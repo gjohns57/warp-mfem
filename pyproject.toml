@@ -1,0 +1,27 @@
+[project]
+name = "warp-mfem"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "newton>=1.1.0",
+    "pyglet>=2.1.14",
+    "warp-lang>=1.12.1",
+]
+# Source - https://stackoverflow.com/a/79513219
+# Posted by Moisés do Nascimento, modified by community. See post 'Timeline' for change history
+# Retrieved 2026-04-30, License - CC BY-SA 4.0
+
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+# Optional: force a specific import mode
+#addopts = ["--import-mode=importlib"]
+
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+    "scipy>=1.17.1",
+]
