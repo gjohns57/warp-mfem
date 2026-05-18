@@ -16,12 +16,22 @@ dependencies = [
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
+
+[tool.uv.workspace]
+members = [
+    "simkit",
+]
+
+[tool.uv.sources]
+simkit = { workspace = true }
 # Optional: force a specific import mode
 #addopts = ["--import-mode=importlib"]
 
 
 [dependency-groups]
 dev = [
+    "libigl>=2.6.2",
     "pytest>=9.0.3",
     "scipy>=1.17.1",
+    "simkit",
 ]

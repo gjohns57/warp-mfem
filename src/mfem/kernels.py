@@ -1,6 +1,6 @@
 import warp as wp
 
-from mfem.utils import deformation_gradient, polar_decomosition, sym_mat33_to_vec6, vec6
+from mfem.utils import deformation_gradient, stretch_component, sym_mat33_to_vec6, vec6
 
 
 @wp.kernel
@@ -19,8 +19,8 @@ def precompute_rest(
 
     # I am not sure whether it is worth storing the volume since it can be computed
     # easily from the rest pose
-    edge_matrix = wp.mat33(x3 - x0, x1 - x0, x2 - x0)
-    volume[tid] = wp.abs(wp.det(edge_matrix)) / 6.0
+    edge_matrix = wp.matrix_from_rows(x3 - x0, x1 - x0, x2 - x0)
+    volume[tid] = wp.abs(wp.determinant(edge_matrix)) / 6.0
     rest[tid] = wp.inverse(edge_matrix)
 
 
@@ -37,22 +37,21 @@ def evaluate_constraints(
     s = stretch[tid]
 
     F = deformation_gradient(particle_q, tets, rest, tid)
-    stretch_grad = sym_mat33_to_vec6(polar_decomosition(F))
+    stretch_grad = sym_mat33_to_vec6(stretch_component(F))
 
     sym = wp.diag(vec6(1.0, 1.0, 1.0, 2.0, 2.0, 2.0))
 
     constraint[tid] = sym * (stretch_grad - s)
 
 
-# @wp.kernel
-# def evaluate_kinetic_gradient_dx(
-#     particle_q: wp.array[wp.vec3],
-#     particle_qd: wp.array[wp.vec3],
-#     dt: float,
-# ):
-#     tid = wp.tid()
-#     x = particle_q[tid]
-#     y = x + particle_qd[tid] * dt
+@wp.kernel
+def evaluate_kinetic_gradient_dx(
+    particle_q: wp.array[wp.vec3],
+    particle_qd: wp.array[wp.vec3],
+    dt: float,
+):
+    tid = wp.tid()
+    x = particle_q[tid]
+    y = x + particle_qd[tid] * dt
 
-
-#     pass
+    pass
