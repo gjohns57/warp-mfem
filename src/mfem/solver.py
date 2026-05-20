@@ -1,20 +1,23 @@
 # import newton
 import warp as wp
 import warp.sparse
+import warp.sparse as ws
 from newton import Contacts, Control, Model, State
 from newton.solvers import SolverBase
 from warp.optim.linear import cg
-from warp.sparse import BsrMatrix
 
-from .kernels import evaluate_constraints, precompute_rest
-from .material_model import MaterialModel
-from .utils import vec6
+from .kernels import (
+    evaluate_constraints,
+    evalutate_constraint_gradient_dx,
+    precompute_mass_matrix,
+    precompute_rest,
+)
+from .material_model import StretchMaterialModel
+from .utils import mat63, vec6
 
 
 class MFEMSolver(SolverBase):
-    def __init__(
-        self, model: Model, material_model: MaterialModel, subspace: BsrMatrix
-    ):
+    def __init__(self, model: Model, material_model: StretchMaterialModel):
         super().__init__(model)
 
         self._material_model = material_model
@@ -33,17 +36,29 @@ class MFEMSolver(SolverBase):
             device=self.model.device,
         )
 
+        mass_diag = wp.empty(self.model.particle_count, dtype=wp.mat33)
+        wp.launch(
+            precompute_mass_matrix,
+            dim=self.model.tet_count,
+            inputs=[
+                self.model.particle_q,
+                self.model.tet_indices,
+                self.model.particle_density,
+            ],
+            outputs=[mass_diag],
+        )
+
         self.model.mass_matrix = warp.sparse.bsr_diag(
-            diag=self.model.particle_masses,
-            rows_of_blocks=1,
-            cols_of_blocks=1,
-            block_type=wp.float32,
+            diag=mass_diag,
+            rows_of_blocks=self.model.particle_count,
+            cols_of_blocks=self.model.particle_count,
+            block_type=wp.mat33,
             device=self.model.device,
         )
 
     def _kinetic_gradient_dx(self, state: State, dt: float) -> wp.array:
         particle_qd = state.particle_qd
-        return self.model.mass_matrix @ (particle_qd / dt)
+        return self.model.mass_matrix @ (particle_qd.reshape(-1, 1) / dt)
 
     def _elastic_gradient_ds(self, state: State) -> wp.array:
         mu = self.model.particle_mu
@@ -68,19 +83,39 @@ class MFEMSolver(SolverBase):
             outputs=[constraints],
         )
 
-        return constraints
+        return constraints.flatten()
 
     def _kinetic_hessian_dx(self, state: State, dt: float) -> wp.array:
         return (1 / (dt * dt)) * self.model.mass_matrix
 
-    def _constraint_gradient_ds_inverse(self, state: State) -> wp.array:
-        raise -warp.sparse.bsr_identity(self.model.tet_count, block_type=wp.float32)
+    def _constraint_gradient_ds_inverse(self, state: State) -> ws.BsrMatrix:
+        return -ws.bsr_identity(self.model.tet_count, block_type=wp.float32)
 
-    def _constraint_gradient_dx(self, state: State) -> wp.array:
-        raise NotImplementedError()
+    def _constraint_gradient_dx(self, state: State) -> ws.BsrMatrix:
+        row_idx = wp.zeros(self.model.tet_count * 4, dtype=wp.uint32)
+        col_idx = wp.zeros(self.model.tet_count * 4, dtype=wp.uint32)
+        values = wp.zeros(self.model.tet_count * 4, dtype=mat63)
+
+        wp.launch(
+            evalutate_constraint_gradient_dx,
+            dim=self.model.tet_count,
+            inputs=[state.particle_q, self.model.tet_indices, self.model.tet_poses],
+            outputs=[row_idx, col_idx, values],
+        )
+
+        G_x = ws.bsr_from_triplets(
+            self.model.tet_count,
+            self.model.particle_count,
+            row_idx,
+            col_idx,
+            values,
+            prune_numerical_zeros=False,
+        )
+
+        return G_x
 
     def _elastic_hessian_ds(self, state: State) -> wp.array:
-        return self._material_model.elastic_hessian_ds(
+        return self._material_model.hessian_ds(
             state.stretch, state.mu, state.lmbda, state.volume
         )
 
@@ -95,7 +130,7 @@ class MFEMSolver(SolverBase):
 
     def _hessian_blocks(
         self, state: State, dt: float
-    ) -> tuple[BsrMatrix, BsrMatrix, BsrMatrix, BsrMatrix]:
+    ) -> tuple[ws.BsrMatrix, ws.BsrMatrix, ws.BsrMatrix, ws.BsrMatrix]:
         kinetic_hessian = self._kinetic_hessian_dx(state, dt)
         elastic_hessian = self._elastic_hessian_ds(state)
         constraint_gradient_ds_inverse = self._constraint_gradient_ds_inverse(state)
@@ -109,7 +144,7 @@ class MFEMSolver(SolverBase):
         )
 
     def _line_search(self, dx, ds, lmbda) -> float:
-        raise NotImplementedError()
+        return 1.0
 
     def step(
         self,
@@ -141,7 +176,7 @@ class MFEMSolver(SolverBase):
         )
         dx = wp.empty_like(state_in.particle_q)
         cg.solve(lhs, rhs, dx)
-        ds = -G_si @ (f_lmbda + G_x & dx)
+        ds = -G_si @ (f_lmbda + G_x @ dx)
         lmbda = -G_si @ (f_s + H_s @ ds)
 
         alpha = self._line_search(dx, ds, lmbda)

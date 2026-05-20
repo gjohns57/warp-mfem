@@ -4,9 +4,16 @@ import numpy as np
 import pytest
 import warp as wp
 
-from mfem.utils import mat99, rotation_gradient, stretch_component, stretch_gradient
+from mfem.utils import (
+    mat69,
+    mat99,
+    rotation_gradient,
+    stretch_component,
+    stretch_gradient,
+)
 from simkit.simkit import polar_svd, stretch_gradient_dF
 from simkit.simkit.rotation_gradient import rotation_gradient_F
+from src.mfem.utils import sym_mat33_to_vec6, unflatten
 
 
 @wp.kernel
@@ -26,10 +33,10 @@ def helper_kernel_test_rotation_gradient(
     result[tid] = dR_dF
 
 
-@wp.kernel
-def helper_kernel_test_stretch_gradient(A: wp.array[wp.mat33], result: wp.array[mat99]):
-    tid = wp.tid()
-    result[tid] = stretch_gradient(A[tid])
+# @wp.kernel
+# def helper_kernel_test_stretch_gradient(A: wp.array[wp.mat33], result: wp.array[mat99]):
+#     tid = wp.tid()
+#     result[tid] = stretch_gradient(A[tid])
 
 
 def test_stretch_component():
@@ -87,6 +94,39 @@ def test_rotation_gradient():
         tested += 1
 
 
+# def test_stretch_gradient():
+#     rng = np.random.default_rng(0)
+#     tested = 0
+#     while tested < 20:
+#         F_cpu = rng.normal(size=(3, 3))
+#         _, s, _ = np.linalg.svd(F_cpu)
+#         if s[-1] < 0.3 or s[-2] - s[-1] < 0.3:
+#             continue
+
+#         F = wp.array(F_cpu, dtype=wp.mat33)
+#         result = wp.zeros(shape=(1,), dtype=mat99)
+#         wp.launch(
+#             helper_kernel_test_stretch_gradient, dim=1, inputs=[F], outputs=[result]
+#         )
+
+#         simkit_result = stretch_gradient_dF(F_cpu.reshape((1, 3, 3))).reshape(
+#             (3, 3, 3, 3)
+#         )
+#         warp_4d = result.numpy()[0].reshape(3, 3, 3, 3)
+
+#         assert warp_4d == pytest.approx(simkit_result, abs=1e-3)
+#         tested += 1
+
+
+@wp.kernel
+def helper_kernel_test_stretch_gradient2(
+    A: wp.array[wp.mat33], result: wp.array[mat69]
+):
+    tid = wp.tid()
+
+    result[tid] = stretch_gradient(A[tid])
+
+
 def test_stretch_gradient():
     rng = np.random.default_rng(0)
     tested = 0
@@ -97,11 +137,24 @@ def test_stretch_gradient():
             continue
 
         F = wp.array(F_cpu, dtype=wp.mat33)
-        result = wp.zeros(shape=(1,), dtype=mat99)
-        wp.launch(helper_kernel_test_stretch_gradient, dim=1, inputs=[F], outputs=[result])
+        result = wp.zeros(shape=(1,), dtype=mat69)
+        wp.launch(
+            helper_kernel_test_stretch_gradient2,
+            dim=1,
+            inputs=[F],
+            outputs=[result],
+        )
 
-        simkit_result = stretch_gradient_dF(F_cpu.reshape((1, 3, 3))).reshape((3, 3, 3, 3))
-        warp_4d = result.numpy()[0].reshape(3, 3, 3, 3)
+        simkit_result = stretch_gradient_dF(F_cpu.reshape((1, 3, 3))).reshape(
+            3, 3, 3, 3
+        )
+        reshaped_simkit = np.zeros((6, 9))
 
-        assert warp_4d == pytest.approx(simkit_result, abs=1e-3)
+        for i in range(3):
+            for j in range(3):
+                reshaped_simkit[:, i * 3 + j] = simkit_result[i, j].reshape((9,))[
+                    [0, 4, 8, 1, 2, 5]
+                ]
+
         tested += 1
+        assert result.numpy()[0] == pytest.approx(reshaped_simkit, abs=1e-4)

@@ -3,10 +3,11 @@ name = "warp-mfem"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.13"
 dependencies = [
     "newton>=1.1.0",
     "pyglet>=2.1.14",
+    "simkit[learn,mesh,solvers,video,viz]",
     "warp-lang>=1.12.1",
 ]
 # Source - https://stackoverflow.com/a/79513219
@@ -31,7 +32,9 @@ simkit = { workspace = true }
 [dependency-groups]
 dev = [
     "libigl>=2.6.2",
+    "polyscope>=2.5.0",
     "pytest>=9.0.3",
     "scipy>=1.17.1",
     "simkit",
+    "torch>=2.12.0",
 ]

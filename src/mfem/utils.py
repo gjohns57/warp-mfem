@@ -19,6 +19,26 @@ class mat99(matrix(shape=(9, 9), dtype=wp.float32)):
     f"""9x9 Matrix for partial^2 I_1 / partial f^2"""
 
 
+class mat912(matrix(shape=(9, 12), dtype=wp.float32)):
+    """dF/dx: Jacobian of the 9 deformation gradient components w.r.t. 12 vertex DOFs."""
+
+
+class mat63(matrix(shape=(6, 3), dtype=wp.float32)):
+    """6 x 3 Matrix"""
+
+
+class mat612(matrix(shape=(6, 12), dtype=wp.float32)):
+    """6 x 12 Matrix"""
+
+
+mat69 = matrix(shape=(6, 9), dtype=wp.float32)
+"""6 x 9 Matrix"""
+
+
+class mat66(matrix(shape=(6, 6), dtype=wp.float32)):
+    """6 x 6 Matrix"""
+
+
 # vec6 = wp.vector(length=6, dtype=wp.float32)
 
 
@@ -56,6 +76,26 @@ def sym_mat33_to_vec6(mat: wp.mat33) -> vec6:
 
 
 @wp.func
+def frob2_sym_vec6(vec: vec6) -> wp.float32:
+    return (
+        vec[0] * vec[0]
+        + vec[1] * vec[1]
+        + vec[2] * vec[2]
+        + 2 * (vec[3] * vec[3] + vec[4] * vec[4] + vec[5] * vec[5])
+    )
+
+
+@wp.func
+def frob_sym_vec6(vec: vec6) -> wp.float32:
+    return wp.sqrt(frob2_sym_vec6(vec))
+
+
+@wp.func
+def tr_sym_vec6(vec: vec6) -> wp.float32:
+    return vec[0] + vec[1] + vec[2]
+
+
+@wp.func
 def deformation_gradient(
     position: wp.array[wp.vec3],
     indices: wp.array2d[wp.uint32],
@@ -70,6 +110,62 @@ def deformation_gradient(
     deformed_edge_matrix = wp.matrix_from_cols(x1 - x0, x2 - x0, x3 - x0)
     rest_edge_matrix = inv_rest_matrix[tid]
     return deformed_edge_matrix * rest_edge_matrix
+
+
+@wp.func
+def deformation_gradient_dF_dx(DmInv: wp.mat33) -> mat912:
+    m = DmInv[0, 0]
+    n = DmInv[0, 1]
+    o = DmInv[0, 2]
+    p = DmInv[1, 0]
+    q = DmInv[1, 1]
+    r = DmInv[1, 2]
+    s = DmInv[2, 0]
+    t = DmInv[2, 1]
+    u = DmInv[2, 2]
+
+    t1 = -m - p - s
+    t2 = -n - q - t
+    t3 = -o - r - u
+
+    dFdx = mat912()
+    dFdx[0, 0] = t1
+    dFdx[0, 3] = m
+    dFdx[0, 6] = p
+    dFdx[0, 9] = s
+    dFdx[1, 1] = t1
+    dFdx[1, 4] = m
+    dFdx[1, 7] = p
+    dFdx[1, 10] = s
+    dFdx[2, 2] = t1
+    dFdx[2, 5] = m
+    dFdx[2, 8] = p
+    dFdx[2, 11] = s
+    dFdx[3, 0] = t2
+    dFdx[3, 3] = n
+    dFdx[3, 6] = q
+    dFdx[3, 9] = t
+    dFdx[4, 1] = t2
+    dFdx[4, 4] = n
+    dFdx[4, 7] = q
+    dFdx[4, 10] = t
+    dFdx[5, 2] = t2
+    dFdx[5, 5] = n
+    dFdx[5, 8] = q
+    dFdx[5, 11] = t
+    dFdx[6, 0] = t3
+    dFdx[6, 3] = o
+    dFdx[6, 6] = r
+    dFdx[6, 9] = u
+    dFdx[7, 1] = t3
+    dFdx[7, 4] = o
+    dFdx[7, 7] = r
+    dFdx[7, 10] = u
+    dFdx[8, 2] = t3
+    dFdx[8, 5] = o
+    dFdx[8, 8] = r
+    dFdx[8, 11] = u
+    return dFdx
 
 
 @wp.func
@@ -102,17 +198,38 @@ def stretch_component(A: wp.mat33):
     return V * wp.diag(sigma) * wp.transpose(V)
 
 
+# @wp.func
+# def stretch_gradient(F: wp.mat33) -> mat99:
+#     dR_dF, U, sigma, V = rotation_gradient(F)
+#     R = U * wp.transpose(V)
+#     grad = mat99()
+
+#     for i in range(3):
+#         for j in range(3):
+#             grad[i * 3 + j, :] = flatten(
+#                 wp.transpose(F) * unflatten(dR_dF[:, j * 3 + i])
+#             )
+#             for s in range(3):
+#                 grad[i * 3 + j, s * 3 + j] += R[i, s]
+
+#     return grad
+
+
+# Returns the gradient of s(F) the first index is the dependent variable s and the second index is the flattened independent variable F
 @wp.func
-def stretch_gradient(F: wp.mat33) -> mat99:
+def stretch_gradient(F: wp.mat33) -> mat69:
     dR_dF, U, sigma, V = rotation_gradient(F)
     R = U * wp.transpose(V)
-    grad = mat99()
+    grad = mat69()
+    FT = wp.transpose(F)
 
     for i in range(3):
         for j in range(3):
-            grad[i * 3 + j, :] = flatten(wp.transpose(F) * unflatten(dR_dF[:, j * 3 + i]))
-            for s in range(3):
-                grad[i * 3 + j, s * 3 + j] += R[i, s]
+            dS_dF_ij = FT * unflatten(dR_dF[:, j * 3 + i])
+            dS_dF_ij[j, 0] += R[i, 0]
+            dS_dF_ij[j, 1] += R[i, 1]
+            dS_dF_ij[j, 2] += R[i, 2]
+            grad[:, i * 3 + j] = sym_mat33_to_vec6(dS_dF_ij)
 
     return grad
 
