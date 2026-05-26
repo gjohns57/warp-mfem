@@ -81,7 +81,7 @@ def frob2_sym_vec6(vec: vec6) -> wp.float32:
         vec[0] * vec[0]
         + vec[1] * vec[1]
         + vec[2] * vec[2]
-        + 2 * (vec[3] * vec[3] + vec[4] * vec[4] + vec[5] * vec[5])
+        + 2.0 * (vec[3] * vec[3] + vec[4] * vec[4] + vec[5] * vec[5])
     )
 
 
@@ -98,7 +98,7 @@ def tr_sym_vec6(vec: vec6) -> wp.float32:
 @wp.func
 def deformation_gradient(
     position: wp.array[wp.vec3],
-    indices: wp.array2d[wp.uint32],
+    indices: wp.array2d[wp.int32],
     inv_rest_matrix: wp.array[wp.mat33],
     tid: int,
 ):

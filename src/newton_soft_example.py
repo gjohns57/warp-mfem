@@ -12,10 +12,11 @@
 #
 ###########################################################################
 
-import warp as wp
-
 import newton
 import newton.examples
+import warp as wp
+
+from mfem import ARAPEnergy, MFEMSolver
 
 
 class Example:
@@ -23,26 +24,28 @@ class Example:
         self.viewer = viewer
         self.solver_type = args.solver
         self.sim_time = 0.0
-        self.fps = 60
+        self.fps = 30
         self.frame_dt = 1.0 / self.fps
         self.sim_substeps = 10
-        self.iterations = 10
+        self.iterations = 3
         self.sim_dt = self.frame_dt / self.sim_substeps
 
         if self.solver_type != "vbd":
-            raise ValueError("The hanging softbody example only supports the VBD solver.")
+            raise ValueError(
+                "The hanging softbody example only supports the VBD solver."
+            )
 
         builder = newton.ModelBuilder()
         builder.add_ground_plane()
 
         # Grid dimensions
-        dim_x = 12
-        dim_y = 4
-        dim_z = 4
+        dim_x = 24
+        dim_y = 8
+        dim_z = 8
         cell_size = 0.1
 
         # Create 4 grids with different damping values
-        damping_values = [1e-1, 1e-2, 1e-3, 1e-4]
+        damping_values = [0.0]
         spacing = 0.6  # Space between grids along Y-axis
 
         for i, k_damp in enumerate(damping_values):
@@ -72,11 +75,10 @@ class Example:
         self.model.soft_contact_kd = 0
         self.model.soft_contact_mu = 1.0
 
-        self.solver = newton.solvers.SolverVBD(
+        self.solver = MFEMSolver(
             model=self.model,
             iterations=self.iterations,
-            particle_enable_self_contact=False,
-            particle_enable_tile_solve=False,
+            material_model=ARAPEnergy,
         )
 
         self.state_0 = self.model.state()
@@ -91,21 +93,24 @@ class Example:
 
     def capture(self):
         if wp.get_device().is_cuda:
-            with wp.ScopedCapture() as capture:
-                self.simulate()
-            self.graph = capture.graph
+            # with wp.ScopedCapture() as capture:
+            self.simulate()
+            # self.graph = capture.graph
+            self.graph = None
         else:
             self.graph = None
 
     def simulate(self):
         for _ in range(self.sim_substeps):
-            self.state_0.clear_forces()
+            # self.state_0.clear_forces()
 
             # apply forces to the model
-            self.viewer.apply_forces(self.state_0)
+            # self.viewer.apply_forces(self.state_0)
 
-            self.model.collide(self.state_0, self.contacts)
-            self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
+            # self.model.collide(self.state_0, self.contacts)
+            self.solver.step(
+                self.state_0, self.state_1, self.control, self.contacts, self.sim_dt
+            )
 
             # swap states
             self.state_0, self.state_1 = self.state_1, self.state_0

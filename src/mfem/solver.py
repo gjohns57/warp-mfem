@@ -1,138 +1,221 @@
 # import newton
+
+
 import warp as wp
 import warp.sparse
 import warp.sparse as ws
 from newton import Contacts, Control, Model, State
 from newton.solvers import SolverBase
-from warp.optim.linear import cg
+from numpy import ma
+from warp.optim.linear import bicgstab, cg
 
 from .kernels import (
     evaluate_constraints,
     evalutate_constraint_gradient_dx,
+    precompute_bsr_topology,
     precompute_mass_matrix,
     precompute_rest,
+    precompute_tet_stretch,
+    test_deform_kernel,
 )
 from .material_model import StretchMaterialModel
-from .utils import mat63, vec6
+from .utils import mat63, mat66, vec6
 
 
 class MFEMSolver(SolverBase):
-    def __init__(self, model: Model, material_model: StretchMaterialModel):
+    def __init__(
+        self,
+        model: Model,
+        material_model: StretchMaterialModel,
+        iterations: int,
+    ):
         super().__init__(model)
 
+        self.solver_iterations = iterations
         self._material_model = material_model
+        self._work_arrays = ws.bsr_mm_work_arrays()
         # self._B = subspace
         self._initial_precompute()
 
+    def _test_deform(self):
+
+        wp.launch(
+            test_deform_kernel,
+            dim=self.model.particle_count,
+            inputs=[self.model.particle_q],
+            device=self.model.device,
+        )
+
     def _initial_precompute(self):
 
-        self.model.volume = wp.empty(self.model.tet_count)
-
+        self.tet_rest_volumes = wp.empty(self.model.tet_count)
         wp.launch(
             precompute_rest,
             dim=self.model.tet_count,
             inputs=[self.model.particle_q, self.model.tet_indices],
-            outputs=[self.model.volume, self.model.tet_rest_volumes],
+            outputs=[self.model.tet_poses, self.tet_rest_volumes],
             device=self.model.device,
         )
 
+        self._test_deform()
+
         mass_diag = wp.empty(self.model.particle_count, dtype=wp.mat33)
+        particle_density = wp.ones(self.model.particle_count, dtype=wp.float32)
         wp.launch(
             precompute_mass_matrix,
             dim=self.model.tet_count,
             inputs=[
                 self.model.particle_q,
                 self.model.tet_indices,
-                self.model.particle_density,
+                particle_density,
             ],
             outputs=[mass_diag],
         )
 
-        self.model.mass_matrix = warp.sparse.bsr_diag(
+        self.tet_stretch = wp.empty(self.model.tet_count, dtype=vec6)
+        wp.launch(
+            precompute_tet_stretch,
+            dim=self.model.tet_count,
+            inputs=[
+                self.model.particle_q,
+                self.model.tet_indices,
+                self.model.tet_poses,
+            ],
+            outputs=[self.tet_stretch],
+            device=self.model.device,
+        )
+
+        self.model.mass_matrix = ws.bsr_diag(
             diag=mass_diag,
             rows_of_blocks=self.model.particle_count,
             cols_of_blocks=self.model.particle_count,
             block_type=wp.mat33,
             device=self.model.device,
         )
+        self.coo_row_idx = wp.zeros(self.model.tet_count * 4, dtype=wp.int32)
+        self.coo_col_idx = wp.zeros(self.model.tet_count * 4, dtype=wp.int32)
+
+        wp.launch(
+            precompute_bsr_topology,
+            dim=self.model.tet_count,
+            inputs=[self.model.tet_indices],
+            outputs=[self.coo_row_idx, self.coo_col_idx],
+        )
+
+        # Run a solver iteration to fill in work arrays
+        dummy_state0 = self.model.state()
+        dummy_state1 = self.model.state()
+        x = wp.array(dummy_state0.particle_q, dtype=wp.vec3)
+        s = wp.array(self.tet_stretch, dtype=vec6)
+        lmbda = wp.zeros_like(s)
+        self._solver_iteration(
+            dummy_state0,
+            dummy_state1,
+            x,
+            s,
+            lmbda,
+            0.01,
+            reuse_topology=False,
+        )
+        # self._precompute_bsr_topologies()
+
+    def _precompute_bsr_topologies(self):
+
+        G_x = ws.bsr_from_triplets(
+            self.model.tet_count,
+            self.model.particle_count,
+            self.coo_row_idx,
+            self.coo_col_idx,
+            wp.ones(self.model.tet_count * 4, dtype=mat63),
+            prune_numerical_zeros=False,
+        )
+
+        G_si = -ws.bsr_identity(self.model.tet_count, block_type=mat66)
+        H_s = warp.sparse.bsr_identity
+
+        K0 = G_x.transpose() @ G_si
+        K1 = K0 @ H_s
+        K2 = K1 @ G_si
+        K3 = K2 @ G_x
+
+        self.intermediate_bsr_matrices = [K0, K1, K2, K3]
 
     def _kinetic_gradient_dx(self, state: State, dt: float) -> wp.array:
         particle_qd = state.particle_qd
-        return self.model.mass_matrix @ (particle_qd.reshape(-1, 1) / dt)
+        return self.model.mass_matrix @ (particle_qd / dt)
 
-    def _elastic_gradient_ds(self, state: State) -> wp.array:
-        mu = self.model.particle_mu
-        lmbda = self.model.particle_lambda
-        stretch = state.tet_stretch
-        volume = self.model.tet_rest_volumes
+    def _elastic_gradient_ds(self, state: State, s: wp.array[vec6]) -> wp.array:
+        volume = self.tet_rest_volumes
+        materials = self.model.tet_materials
 
-        return self._material_model.gradient_ds(stretch, mu, lmbda, volume)
+        return self._material_model.gradient_ds(s, materials, volume)
 
-    def _constraints(self, state: State) -> wp.array:
-        particle_q = state.particle_q
-        stretch = state.tet_stretch
+    def _constraints(
+        self, state: State, x: wp.array[wp.vec3], s: wp.array[vec6]
+    ) -> wp.array:
         tets = self.model.tet_indices
         rest = self.model.tet_poses
 
-        constraints = wp.empty(shape=self.model.tet_count, dtype=vec6)
+        constraints = wp.empty(shape=(self.model.tet_count,), dtype=vec6)
 
         wp.launch(
             evaluate_constraints,
             dim=tets.shape[0],
-            inputs=[particle_q, stretch, tets, rest],
+            inputs=[x, s, tets, rest],
             outputs=[constraints],
         )
 
-        return constraints.flatten()
+        return constraints
 
-    def _kinetic_hessian_dx(self, state: State, dt: float) -> wp.array:
+    def _kinetic_hessian_dx(self, _state: State, dt: float) -> wp.array:
         return (1 / (dt * dt)) * self.model.mass_matrix
 
+    # TODO: fix block dimensions
     def _constraint_gradient_ds_inverse(self, state: State) -> ws.BsrMatrix:
-        return -ws.bsr_identity(self.model.tet_count, block_type=wp.float32)
+        return -ws.bsr_identity(self.model.tet_count, block_type=mat66)
 
     def _constraint_gradient_dx(self, state: State) -> ws.BsrMatrix:
-        row_idx = wp.zeros(self.model.tet_count * 4, dtype=wp.uint32)
-        col_idx = wp.zeros(self.model.tet_count * 4, dtype=wp.uint32)
+
         values = wp.zeros(self.model.tet_count * 4, dtype=mat63)
 
         wp.launch(
             evalutate_constraint_gradient_dx,
             dim=self.model.tet_count,
             inputs=[state.particle_q, self.model.tet_indices, self.model.tet_poses],
-            outputs=[row_idx, col_idx, values],
+            outputs=[values],
         )
 
         G_x = ws.bsr_from_triplets(
             self.model.tet_count,
             self.model.particle_count,
-            row_idx,
-            col_idx,
+            self.coo_row_idx,
+            self.coo_col_idx,
             values,
             prune_numerical_zeros=False,
         )
 
         return G_x
 
-    def _elastic_hessian_ds(self, state: State) -> wp.array:
+    def _elastic_hessian_ds(self, state: State, s: wp.array[vec6]) -> wp.array:
+
         return self._material_model.hessian_ds(
-            state.stretch, state.mu, state.lmbda, state.volume
+            stretch=s, material=self.model.tet_materials, volume=self.tet_rest_volumes
         )
 
     def _gradient_blocks(
-        self, state: State, dt: float
+        self, state: State, x: wp.array[wp.vec3], s: wp.array[vec6], dt: float
     ) -> tuple[wp.array, wp.array, wp.array]:
         kinetic_gradient = self._kinetic_gradient_dx(state, dt)
-        elastic_gradient = self._elastic_gradient_ds(state)
-        constraints = self._constraints(state)
+        elastic_gradient = self._elastic_gradient_ds(state, s)
+        constraints = self._constraints(state, x, s)
 
         return kinetic_gradient, elastic_gradient, constraints
 
     def _hessian_blocks(
-        self, state: State, dt: float
+        self, state: State, x: wp.array[wp.vec3], s: wp.array[vec6], dt: float
     ) -> tuple[ws.BsrMatrix, ws.BsrMatrix, ws.BsrMatrix, ws.BsrMatrix]:
         kinetic_hessian = self._kinetic_hessian_dx(state, dt)
-        elastic_hessian = self._elastic_hessian_ds(state)
+        elastic_hessian = self._elastic_hessian_ds(state, s)
         constraint_gradient_ds_inverse = self._constraint_gradient_ds_inverse(state)
         constraint_gradient_dx = self._constraint_gradient_dx(state)
 
@@ -146,6 +229,87 @@ class MFEMSolver(SolverBase):
     def _line_search(self, dx, ds, lmbda) -> float:
         return 1.0
 
+    def _solver_iteration(
+        self,
+        state_in: State,
+        state_out: State,
+        x: wp.array[wp.vec3],
+        s: wp.array[vec6],
+        lmbda: wp.array[vec6],
+        dt: float,
+        reuse_topology: bool = True,
+    ) -> tuple[wp.array[wp.vec3], wp.array[vec6], wp.array[vec6]]:
+        (
+            H_x,  # Kinetic Hessian
+            H_s,  # Elastic Hessian
+            G_si,  # Inverse constraint gradient with respect to stretch
+            G_x,  # Constraint gradient with respect to position
+        ) = self._hessian_blocks(state_in, x, s, dt)
+        (
+            f_x,  # Kinetic gradient
+            f_s,  # Constraint gradient with respect to stretch
+            f_lmbda,  # Constraint values
+        ) = self._gradient_blocks(state_in, x, s, dt)
+
+        # K = G_x.transpose() @ G_si @ H_s @ G_si @ G_x
+        # [K0, K1, K2, K3] = self.intermediate_bsr_matrices
+        # K0 = ws.bsr_mm(G_x.transpose(), G_si, K0, masked=True)
+        # K1 = ws.bsr_mm(K0, H_s, K1, masked=True)
+        # K2 = ws.bsr_mm(K1, G_si, K2, masked=True)
+        # K3 = ws.bsr_mm(K2, G_x, K3, masked=True)
+        with wp.ScopedTimer("Assemble system"):
+            G_xT = G_x.transpose()
+            K = ws.bsr_mm(
+                G_xT,
+                G_si,
+                reuse_topology=reuse_topology,
+                work_arrays=self._work_arrays,
+            )
+            K = ws.bsr_mm(
+                K, H_s, reuse_topology=reuse_topology, work_arrays=self._work_arrays
+            )
+            K = ws.bsr_mm(
+                K, G_si, reuse_topology=reuse_topology, work_arrays=self._work_arrays
+            )
+            self._lhs = ws.bsr_mm(
+                K, G_x, reuse_topology=reuse_topology, work_arrays=self._work_arrays
+            )
+
+            self._lhs = ws.bsr_axpy(H_x, self._lhs)
+
+            A = ws.bsr_mm(
+                G_xT,
+                G_si,
+                reuse_topology=reuse_topology,
+                work_arrays=self._work_arrays,
+            )
+            B = ws.bsr_mm(
+                H_s,
+                G_si,
+                reuse_topology=reuse_topology,
+                work_arrays=self._work_arrays,
+            )
+            self._rhs = A @ (f_s - B @ f_lmbda) - f_x
+
+        # rhs = (
+        #     G_x.transpose()
+        #     @ G_si
+        #     @ (f_s - H_s @ G_si @ f_lmbda)
+        #     - f_x
+        # )
+        dx = wp.zeros_like(x)  # This should be a better initial guess
+        with wp.ScopedTimer("CG solve"):
+            #     cg(self._lhs, self._rhs, dx, check_every=0, use_cuda_graph=True, maxiter=10)
+            bicgstab(self._lhs, self._rhs, dx, check_every=0, maxiter=100)
+            print(dx.numpy().mean())
+
+        ds = -G_si @ (f_lmbda + G_x @ dx)
+        lmbda = -G_si @ (f_s + H_s @ ds)
+
+        alpha = self._line_search(dx, ds, lmbda)
+
+        return x + alpha * dx, s + alpha * ds, lmbda
+
     def step(
         self,
         state_in: State,
@@ -154,31 +318,21 @@ class MFEMSolver(SolverBase):
         contacts: Contacts | None,
         dt: float,
     ) -> None:
-        (
-            H_x,  # Kinetic Hessian
-            H_s,  # Elastic Hessian
-            G_si,  # Inverse constraint gradient with respect to stretch
-            G_x,  # Constraint gradient with respect to position
-        ) = self._hessian_blocks(state_in, dt)
-        (
-            f_x,  # Kinetic gradient
-            f_s,  # Constraint gradient with respect to stretch
-            f_lmbda,  # Constraint values
-        ) = self._gradient_blocks(state_in, dt)
+        x = wp.array(state_in.particle_q, dtype=wp.vec3)
+        s = wp.array(self.tet_stretch, dtype=vec6)
+        lmbda = wp.zeros_like(s)
 
-        K = G_x @ G_si @ H_x @ G_si @ G_x.transpose()
-        lhs = H_x + K
-        rhs = (
-            G_x.transpose()
-            @ G_si
-            @ (f_s - H_s @ G_si @ (f_lmbda - H_x @ G_si @ f_lmbda))
-            - f_x
-        )
-        dx = wp.empty_like(state_in.particle_q)
-        cg.solve(lhs, rhs, dx)
-        ds = -G_si @ (f_lmbda + G_x @ dx)
-        lmbda = -G_si @ (f_s + H_s @ ds)
+        for _ in range(self.solver_iterations):
+            with wp.ScopedTimer("Solver iteration"):
+                x, s, lmbda = self._solver_iteration(
+                    state_in,
+                    state_out,
+                    x,
+                    s,
+                    lmbda,
+                    dt,
+                )
 
-        alpha = self._line_search(dx, ds, lmbda)
-        state_out.particle_q = state_in.particle_q + alpha * dx
-        state_out.stretch = state_in.stretch + alpha * ds
+        state_out.particle_qd = (x - state_in.particle_q) / dt
+        state_out.particle_q = x
+        self.model.tet_stretch = s

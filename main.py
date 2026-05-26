@@ -1,5 +1,4 @@
 import warp as wp
-from warp._src.codegen import vec3i
 
 
 @wp.kernel
