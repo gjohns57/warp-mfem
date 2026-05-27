@@ -1,4 +1,5 @@
 import warp as wp
+import warp.sparse as ws
 from warp.types import matrix, vector
 
 """
@@ -7,8 +8,9 @@ I found this awesome guide: https://www.tkim.graphics/DYNAMIC_DEFORMABLES/Dynami
 """
 
 
-class vec6(vector(length=6, dtype=wp.float32)):
-    """Symmetric 3x3 matrix stored as a 6-element vector."""
+# class vec6(vector(length=6, dtype=wp.float32)):
+#     """Symmetric 3x3 matrix stored as a 6-element vector."""
+vec6 = vector(length=6, dtype=wp.float32)
 
 
 class vec9(vector(length=9, dtype=wp.float32)):
@@ -264,3 +266,23 @@ def rotation_gradient(F: wp.mat33) -> tuple[mat99, wp.mat33, wp.vec3, wp.mat33]:
         + (2.0 / s02) * wp.outer(t2, t2)
     )
     return dR_dF, U, sigma, V
+
+
+@wp.kernel
+def invert_diagonal_values(
+    values: wp.array3d[wp.float32],
+    dim: int,
+):
+    tid = wp.tid()
+
+    for i in range(dim):
+        values[tid, i, i] = 1.0 / values[tid, i, i]
+
+
+def invert_diagonal_bsr(mat: ws.BsrMatrix) -> ws.BsrMatrix:
+    wp.launch(
+        kernel=invert_diagonal_values,
+        dim=mat.nnz,
+        inputs=[mat.scalar_values, min(mat.block_shape[0], mat.block_shape[1])],
+    )
+    return mat

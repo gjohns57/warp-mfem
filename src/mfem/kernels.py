@@ -65,22 +65,22 @@ def precompute_mass_matrix(
     wp.atomic_add(
         mass,
         tets[tid, 0],
-        wp.identity(3, dtype=wp.float32) * density[tid] * volume / 4.0,
+        wp.identity(3, dtype=wp.float32) * density[tets[tid, 0]] * volume / 4.0,
     )
     wp.atomic_add(
         mass,
         tets[tid, 1],
-        wp.identity(3, dtype=wp.float32) * density[tid] * volume / 4.0,
+        wp.identity(3, dtype=wp.float32) * density[tets[tid, 1]] * volume / 4.0,
     )
     wp.atomic_add(
         mass,
         tets[tid, 2],
-        wp.identity(3, dtype=wp.float32) * density[tid] * volume / 4.0,
+        wp.identity(3, dtype=wp.float32) * density[tets[tid, 2]] * volume / 4.0,
     )
     wp.atomic_add(
         mass,
         tets[tid, 3],
-        wp.identity(3, dtype=wp.float32) * density[tid] * volume / 4.0,
+        wp.identity(3, dtype=wp.float32) * density[tets[tid, 3]] * volume / 4.0,
     )
 
 
@@ -132,7 +132,7 @@ def evaluate_constraints(
 
 
 @wp.kernel
-def evalutate_constraint_gradient_dx(
+def evaluate_constraint_gradient_dx(
     particle_q: wp.array[wp.vec3],
     tets: wp.array2d[wp.int32],
     rest: wp.array[wp.mat33],

@@ -10,8 +10,8 @@ from numpy import ma
 from warp.optim.linear import bicgstab, cg
 
 from .kernels import (
+    evaluate_constraint_gradient_dx,
     evaluate_constraints,
-    evalutate_constraint_gradient_dx,
     precompute_bsr_topology,
     precompute_mass_matrix,
     precompute_rest,
@@ -19,7 +19,7 @@ from .kernels import (
     test_deform_kernel,
 )
 from .material_model import StretchMaterialModel
-from .utils import mat63, mat66, vec6
+from .utils import invert_diagonal_bsr, mat63, mat66, vec6
 
 
 class MFEMSolver(SolverBase):
@@ -33,8 +33,17 @@ class MFEMSolver(SolverBase):
 
         self.solver_iterations = iterations
         self._material_model = material_model
-        self._work_arrays = ws.bsr_mm_work_arrays()
+        self._work_arrays = {
+            "HsGsi": ws.bsr_mm_work_arrays(),
+            "Hlmbda": ws.bsr_mm_work_arrays(),
+            "GxtHlmbda": ws.bsr_mm_work_arrays(),
+            "GxtHlmbdaGx": ws.bsr_mm_work_arrays(),
+        }
+
+        print("Particles:", self.model.particle_count, "Tets:", self.model.tet_count)
         # self._B = subspace
+        #
+
         self._initial_precompute()
 
     def _test_deform(self):
@@ -45,6 +54,9 @@ class MFEMSolver(SolverBase):
             inputs=[self.model.particle_q],
             device=self.model.device,
         )
+
+        wp.synchronize()
+        print("test deform done")
 
     def _initial_precompute(self):
 
@@ -57,9 +69,12 @@ class MFEMSolver(SolverBase):
             device=self.model.device,
         )
 
+        wp.synchronize()
+        print("precompute rest done")
+
         self._test_deform()
 
-        mass_diag = wp.empty(self.model.particle_count, dtype=wp.mat33)
+        mass_diag = wp.zeros(self.model.particle_count, dtype=wp.mat33)
         particle_density = wp.ones(self.model.particle_count, dtype=wp.float32)
         wp.launch(
             precompute_mass_matrix,
@@ -71,6 +86,9 @@ class MFEMSolver(SolverBase):
             ],
             outputs=[mass_diag],
         )
+
+        wp.synchronize()
+        print("precompute mass done")
 
         self.tet_stretch = wp.empty(self.model.tet_count, dtype=vec6)
         wp.launch(
@@ -84,6 +102,9 @@ class MFEMSolver(SolverBase):
             outputs=[self.tet_stretch],
             device=self.model.device,
         )
+
+        wp.synchronize()
+        print("precompute tet stretch done")
 
         self.model.mass_matrix = ws.bsr_diag(
             diag=mass_diag,
@@ -108,37 +129,17 @@ class MFEMSolver(SolverBase):
         x = wp.array(dummy_state0.particle_q, dtype=wp.vec3)
         s = wp.array(self.tet_stretch, dtype=vec6)
         lmbda = wp.zeros_like(s)
-        self._solver_iteration(
-            dummy_state0,
-            dummy_state1,
-            x,
-            s,
-            lmbda,
-            0.01,
-            reuse_topology=False,
-        )
+        with wp.ScopedTimer("Warm up iteration", active=True):
+            self._solver_iteration(
+                dummy_state0,
+                dummy_state1,
+                x,
+                s,
+                lmbda,
+                0.01,
+                reuse_topology=False,
+            )
         # self._precompute_bsr_topologies()
-
-    def _precompute_bsr_topologies(self):
-
-        G_x = ws.bsr_from_triplets(
-            self.model.tet_count,
-            self.model.particle_count,
-            self.coo_row_idx,
-            self.coo_col_idx,
-            wp.ones(self.model.tet_count * 4, dtype=mat63),
-            prune_numerical_zeros=False,
-        )
-
-        G_si = -ws.bsr_identity(self.model.tet_count, block_type=mat66)
-        H_s = warp.sparse.bsr_identity
-
-        K0 = G_x.transpose() @ G_si
-        K1 = K0 @ H_s
-        K2 = K1 @ G_si
-        K3 = K2 @ G_x
-
-        self.intermediate_bsr_matrices = [K0, K1, K2, K3]
 
     def _kinetic_gradient_dx(self, state: State, dt: float) -> wp.array:
         particle_qd = state.particle_qd
@@ -179,7 +180,7 @@ class MFEMSolver(SolverBase):
         values = wp.zeros(self.model.tet_count * 4, dtype=mat63)
 
         wp.launch(
-            evalutate_constraint_gradient_dx,
+            evaluate_constraint_gradient_dx,
             dim=self.model.tet_count,
             inputs=[state.particle_q, self.model.tet_indices, self.model.tet_poses],
             outputs=[values],
@@ -238,6 +239,7 @@ class MFEMSolver(SolverBase):
         lmbda: wp.array[vec6],
         dt: float,
         reuse_topology: bool = True,
+        timer: bool = False,
     ) -> tuple[wp.array[wp.vec3], wp.array[vec6], wp.array[vec6]]:
         (
             H_x,  # Kinetic Hessian
@@ -246,9 +248,9 @@ class MFEMSolver(SolverBase):
             G_x,  # Constraint gradient with respect to position
         ) = self._hessian_blocks(state_in, x, s, dt)
         (
-            f_x,  # Kinetic gradient
-            f_s,  # Constraint gradient with respect to stretch
-            f_lmbda,  # Constraint values
+            g_x,  # Kinetic gradient
+            g_s,  # Constraint gradient with respect to stretch
+            constraint,  # Constraint values
         ) = self._gradient_blocks(state_in, x, s, dt)
 
         # K = G_x.transpose() @ G_si @ H_s @ G_si @ G_x
@@ -257,57 +259,95 @@ class MFEMSolver(SolverBase):
         # K1 = ws.bsr_mm(K0, H_s, K1, masked=True)
         # K2 = ws.bsr_mm(K1, G_si, K2, masked=True)
         # K3 = ws.bsr_mm(K2, G_x, K3, masked=True)
-        with wp.ScopedTimer("Assemble system"):
-            G_xT = G_x.transpose()
-            K = ws.bsr_mm(
-                G_xT,
-                G_si,
-                reuse_topology=reuse_topology,
-                work_arrays=self._work_arrays,
-            )
-            K = ws.bsr_mm(
-                K, H_s, reuse_topology=reuse_topology, work_arrays=self._work_arrays
-            )
-            K = ws.bsr_mm(
-                K, G_si, reuse_topology=reuse_topology, work_arrays=self._work_arrays
-            )
-            self._lhs = ws.bsr_mm(
-                K, G_x, reuse_topology=reuse_topology, work_arrays=self._work_arrays
-            )
+        # with wp.ScopedTimer("Assemble system"):
+        #     G_xT = G_x.transpose()
+        #     K = ws.bsr_mm(
+        #         G_xT,
+        #         G_si,
+        #         reuse_topology=reuse_topology,
+        #         work_arrays=self._work_arrays,
+        #     )
+        #     K = ws.bsr_mm(
+        #         K, H_s, reuse_topology=reuse_topology, work_arrays=self._work_arrays
+        #     )
+        #     K = ws.bsr_mm(
+        #         K, G_si, reuse_topology=reuse_topology, work_arrays=self._work_arrays
+        #     )
+        #     self._lhs = ws.bsr_mm(
+        #         K, G_x, reuse_topology=reuse_topology, work_arrays=self._work_arrays
+        #     )
 
-            self._lhs = ws.bsr_axpy(H_x, self._lhs)
+        #     self._lhs = ws.bsr_axpy(H_x, self._lhs)
 
-            A = ws.bsr_mm(
-                G_xT,
-                G_si,
-                reuse_topology=reuse_topology,
-                work_arrays=self._work_arrays,
-            )
-            B = ws.bsr_mm(
+        #     A = ws.bsr_mm(
+        #         G_xT,
+        #         G_si,
+        #         reuse_topology=reuse_topology,
+        #         work_arrays=self._work_arrays,
+        #     )
+        #     B = ws.bsr_mm(
+        #         H_s,
+        #         G_si,
+        #         reuse_topology=reuse_topology,
+        #         work_arrays=self._work_arrays,
+        #     )
+        #     self._rhs = A @ (f_s - B @ f_lmbda) - f_x
+        with wp.ScopedTimer("Assemble system", active=timer):
+            # wp.launch(
+            #     invert_diagonal_values,
+            #     dim=min(H_s.nrow, H_s.ncol),
+            #     inputs=[H_s.scalar_values(), H_s.block_shape()],
+            G_xt = G_x.transpose()
+            HsGsi = ws.bsr_mm(
                 H_s,
                 G_si,
                 reuse_topology=reuse_topology,
-                work_arrays=self._work_arrays,
+                work_arrays=self._work_arrays["HsGsi"],
+            )  # )
+
+            H_lmbda = ws.bsr_mm(
+                G_si,
+                HsGsi,
+                reuse_topology=reuse_topology,
+                work_arrays=self._work_arrays["Hlmbda"],
             )
-            self._rhs = A @ (f_s - B @ f_lmbda) - f_x
 
-        # rhs = (
-        #     G_x.transpose()
-        #     @ G_si
-        #     @ (f_s - H_s @ G_si @ f_lmbda)
-        #     - f_x
-        # )
+            invert_diagonal_bsr(HsGsi)
+
+            g_lmbda = constraint - HsGsi @ g_s
+
+            GxtHlmbda = ws.bsr_mm(
+                G_xt,
+                H_lmbda,
+                work_arrays=self._work_arrays["GxtHlmbda"],
+                reuse_topology=reuse_topology,
+            )
+
+            GxtHlmbdaGx = ws.bsr_mm(
+                GxtHlmbda,
+                G_x,
+                reuse_topology=reuse_topology,
+                work_arrays=self._work_arrays["GxtHlmbdaGx"],
+            )
+
+            H = self.model.mass_matrix + GxtHlmbdaGx
+            g = g_x - GxtHlmbda @ g_lmbda
+            self._lhs = H
+            self._rhs = g
+
         dx = wp.zeros_like(x)  # This should be a better initial guess
-        with wp.ScopedTimer("CG solve"):
+        with wp.ScopedTimer("Global solve", active=timer):
             #     cg(self._lhs, self._rhs, dx, check_every=0, use_cuda_graph=True, maxiter=10)
-            bicgstab(self._lhs, self._rhs, dx, check_every=0, maxiter=100)
-            print(dx.numpy().mean())
+            cg(self._lhs, self._rhs, dx, check_every=10)
+            print(dx.numpy())
 
-        ds = -G_si @ (f_lmbda + G_x @ dx)
-        lmbda = -G_si @ (f_s + H_s @ ds)
+        with wp.ScopedTimer("Local solve", active=timer):
+            Hsi = invert_diagonal_bsr(H_s)
+            # G_s = invert_diagonal_bsr(G_si)
+            lmbda = H_lmbda @ (g_lmbda + G_x @ dx)
+            ds = -Hsi @ (G_si @ lmbda + g_s)
 
         alpha = self._line_search(dx, ds, lmbda)
-
         return x + alpha * dx, s + alpha * ds, lmbda
 
     def step(
@@ -322,15 +362,10 @@ class MFEMSolver(SolverBase):
         s = wp.array(self.tet_stretch, dtype=vec6)
         lmbda = wp.zeros_like(s)
 
-        for _ in range(self.solver_iterations):
-            with wp.ScopedTimer("Solver iteration"):
+        for i in range(self.solver_iterations):
+            with wp.ScopedTimer("Iteration " + str(i)):
                 x, s, lmbda = self._solver_iteration(
-                    state_in,
-                    state_out,
-                    x,
-                    s,
-                    lmbda,
-                    dt,
+                    state_in, state_out, x, s, lmbda, dt, timer=True
                 )
 
         state_out.particle_qd = (x - state_in.particle_q) / dt

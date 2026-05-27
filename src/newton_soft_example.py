@@ -26,7 +26,7 @@ class Example:
         self.sim_time = 0.0
         self.fps = 30
         self.frame_dt = 1.0 / self.fps
-        self.sim_substeps = 10
+        self.sim_substeps = 1
         self.iterations = 3
         self.sim_dt = self.frame_dt / self.sim_substeps
 
@@ -39,10 +39,10 @@ class Example:
         builder.add_ground_plane()
 
         # Grid dimensions
-        dim_x = 24
-        dim_y = 8
-        dim_z = 8
-        cell_size = 0.1
+        dim_x = 1
+        dim_y = 1
+        dim_z = 1
+        cell_size = 1.0
 
         # Create 4 grids with different damping values
         damping_values = [0.0]
@@ -92,13 +92,13 @@ class Example:
         self.capture()
 
     def capture(self):
-        if wp.get_device().is_cuda:
-            # with wp.ScopedCapture() as capture:
-            self.simulate()
-            # self.graph = capture.graph
-            self.graph = None
-        else:
-            self.graph = None
+        pass
+        # if wp.get_device().is_cuda:
+        #     with wp.ScopedCapture() as capture:
+        #         self.simulate()
+        #     self.graph = capture.graph
+        # else:
+        #     self.graph = None
 
     def simulate(self):
         for _ in range(self.sim_substeps):
@@ -116,10 +116,10 @@ class Example:
             self.state_0, self.state_1 = self.state_1, self.state_0
 
     def step(self):
-        if self.graph:
-            wp.capture_launch(self.graph)
-        else:
-            self.simulate()
+        # if self.graph:
+        #     wp.capture_launch(self.graph)
+        # else:
+        self.simulate()
 
         self.sim_time += self.frame_dt
 
