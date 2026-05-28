@@ -2,7 +2,8 @@ import warp as wp
 import warp.sparse as ws
 
 from .material_model import StretchMaterialModel
-from .utils import frob2_sym_vec6, mat66, tr_sym_vec6, vec6
+from .types import mat66, vec6
+from .utils import frob2_sym_vec6, tr_sym_vec6
 
 
 @wp.kernel

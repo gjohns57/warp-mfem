@@ -6,7 +6,6 @@ import warp.sparse
 import warp.sparse as ws
 from newton import Contacts, Control, Model, State
 from newton.solvers import SolverBase
-from numpy import ma
 from warp.optim.linear import bicgstab, cg
 
 from .kernels import (
@@ -19,7 +18,8 @@ from .kernels import (
     test_deform_kernel,
 )
 from .material_model import StretchMaterialModel
-from .utils import invert_diagonal_bsr, mat63, mat66, vec6
+from .types import mat63, mat66, vec6
+from .utils import invert_diagonal_bsr
 
 
 class MFEMSolver(SolverBase):

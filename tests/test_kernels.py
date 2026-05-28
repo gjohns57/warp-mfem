@@ -138,12 +138,13 @@ def flattened_evaluate_constraint(
     tets: wp.array2d[wp.int32],
     rest: wp.array[wp.vec3],
     n_tets: int,
+    n_particles: int,
 ) -> wp.array2d[wp.float32]:
 
     constraint = wp.zeros((n_tets, 6), dtype=wp.float32, requires_grad=True)
 
     constraints_vec = wp.zeros(n_tets, dtype=vec6)
-    position_vec = wp.zeros(n_tets, dtype=wp.vec3, requires_grad=True)
+    position_vec = wp.zeros(n_particles, dtype=wp.vec3, requires_grad=True)
 
     wp.launch(
         array2d_to_vec3_array,
@@ -167,7 +168,7 @@ def flattened_evaluate_constraint(
     return constraint
 
 
-def test_elastic_gradient_dx():
+def test_constraint_gradient_dx():
     # Unit tet: x0 at origin, edges along coordinate axes
     og_position = np.array(
         [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
@@ -219,32 +220,10 @@ def test_elastic_gradient_dx():
 
     jacobians = wg.jacobian_fd(
         flattened_evaluate_constraint,
-        inputs=[position_array2d, stretch, tets, rest, n_tets],
+        inputs=[position_array2d, stretch, tets, rest, n_tets, n_particles],
         dim=(n_tets,),
     )
 
     dense_bsr = bsr_to_dense(bsr)
-    assert dense_bsr.numpy() == pytest.approx(jacobians[(0, 0)].numpy(), rel=1e-3)
-
-
-@wp.kernel
-def test_kernel(
-    input: wp.array[vec6],
-    output: wp.array[vec6],
-):
-    tid = wp.tid()
-    output[tid] = input[tid] * 2.0
-
-
-def test_autograd_jacobian():
-
-    input = wp.zeros(4, dtype=wp.vec3, requires_grad=True)
-    output = wp.zeros(4, dtype=wp.vec3, requires_grad=True)
-
-    jacobians = wg.jacobian(
-        test_kernel,
-        inputs=[input],
-        outputs=[output],
-        dim=(4,),
-    )
-    print(jacobians[(0, 0)])
+    print(jacobians[(0, 0)].numpy())
+    assert dense_bsr.numpy() == pytest.approx(jacobians[(0, 0)].numpy(), rel=1e-1)

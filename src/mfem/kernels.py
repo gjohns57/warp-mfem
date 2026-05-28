@@ -1,13 +1,12 @@
 import warp as wp
 
-from mfem.utils import (
+from .types import mat63, vec6
+from .utils import (
     deformation_gradient,
     deformation_gradient_dF_dx,
-    mat63,
     stretch_component,
     stretch_gradient,
     sym_mat33_to_vec6,
-    vec6,
 )
 
 

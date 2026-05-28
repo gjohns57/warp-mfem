@@ -1,6 +1,7 @@
 import warp as wp
 import warp.sparse as ws
-from warp.types import matrix, vector
+
+from .types import mat69, mat99, mat912, vec6, vec9
 
 """
 Utilities for MFEM elastic energy functions:
@@ -10,36 +11,6 @@ I found this awesome guide: https://www.tkim.graphics/DYNAMIC_DEFORMABLES/Dynami
 
 # class vec6(vector(length=6, dtype=wp.float32)):
 #     """Symmetric 3x3 matrix stored as a 6-element vector."""
-vec6 = vector(length=6, dtype=wp.float32)
-
-
-class vec9(vector(length=9, dtype=wp.float32)):
-    """"""
-
-
-class mat99(matrix(shape=(9, 9), dtype=wp.float32)):
-    f"""9x9 Matrix for partial^2 I_1 / partial f^2"""
-
-
-class mat912(matrix(shape=(9, 12), dtype=wp.float32)):
-    """dF/dx: Jacobian of the 9 deformation gradient components w.r.t. 12 vertex DOFs."""
-
-
-class mat63(matrix(shape=(6, 3), dtype=wp.float32)):
-    """6 x 3 Matrix"""
-
-
-class mat612(matrix(shape=(6, 12), dtype=wp.float32)):
-    """6 x 12 Matrix"""
-
-
-mat69 = matrix(shape=(6, 9), dtype=wp.float32)
-"""6 x 9 Matrix"""
-
-
-class mat66(matrix(shape=(6, 6), dtype=wp.float32)):
-    """6 x 6 Matrix"""
-
 
 # vec6 = wp.vector(length=6, dtype=wp.float32)
 
@@ -103,7 +74,7 @@ def deformation_gradient(
     indices: wp.array2d[wp.int32],
     inv_rest_matrix: wp.array[wp.mat33],
     tid: int,
-):
+) -> wp.mat33:
     x0 = position[indices[tid, 0]]
     x1 = position[indices[tid, 1]]
     x2 = position[indices[tid, 2]]
@@ -130,39 +101,40 @@ def deformation_gradient_dF_dx(DmInv: wp.mat33) -> mat912:
     t2 = -n - q - t
     t3 = -o - r - u
 
+    # Row-major: row i*3+j corresponds to F[i,j]; nonzero cols are 3*k+i for vertices k=0..3
     dFdx = mat912()
     dFdx[0, 0] = t1
     dFdx[0, 3] = m
     dFdx[0, 6] = p
     dFdx[0, 9] = s
-    dFdx[1, 1] = t1
-    dFdx[1, 4] = m
-    dFdx[1, 7] = p
-    dFdx[1, 10] = s
-    dFdx[2, 2] = t1
-    dFdx[2, 5] = m
-    dFdx[2, 8] = p
-    dFdx[2, 11] = s
-    dFdx[3, 0] = t2
-    dFdx[3, 3] = n
-    dFdx[3, 6] = q
-    dFdx[3, 9] = t
+    dFdx[1, 0] = t2
+    dFdx[1, 3] = n
+    dFdx[1, 6] = q
+    dFdx[1, 9] = t
+    dFdx[2, 0] = t3
+    dFdx[2, 3] = o
+    dFdx[2, 6] = r
+    dFdx[2, 9] = u
+    dFdx[3, 1] = t1
+    dFdx[3, 4] = m
+    dFdx[3, 7] = p
+    dFdx[3, 10] = s
     dFdx[4, 1] = t2
     dFdx[4, 4] = n
     dFdx[4, 7] = q
     dFdx[4, 10] = t
-    dFdx[5, 2] = t2
-    dFdx[5, 5] = n
-    dFdx[5, 8] = q
-    dFdx[5, 11] = t
-    dFdx[6, 0] = t3
-    dFdx[6, 3] = o
-    dFdx[6, 6] = r
-    dFdx[6, 9] = u
-    dFdx[7, 1] = t3
-    dFdx[7, 4] = o
-    dFdx[7, 7] = r
-    dFdx[7, 10] = u
+    dFdx[5, 1] = t3
+    dFdx[5, 4] = o
+    dFdx[5, 7] = r
+    dFdx[5, 10] = u
+    dFdx[6, 2] = t1
+    dFdx[6, 5] = m
+    dFdx[6, 8] = p
+    dFdx[6, 11] = s
+    dFdx[7, 2] = t2
+    dFdx[7, 5] = n
+    dFdx[7, 8] = q
+    dFdx[7, 11] = t
     dFdx[8, 2] = t3
     dFdx[8, 5] = o
     dFdx[8, 8] = r
