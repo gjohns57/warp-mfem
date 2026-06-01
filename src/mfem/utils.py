@@ -1,3 +1,6 @@
+from tkinter.constants import N
+
+import numpy as np
 import warp as wp
 import warp.sparse as ws
 
@@ -252,9 +255,50 @@ def invert_diagonal_values(
 
 
 def invert_diagonal_bsr(mat: ws.BsrMatrix) -> ws.BsrMatrix:
+    if hasattr(mat, "eval"):
+        mat = mat.eval()
+
     wp.launch(
         kernel=invert_diagonal_values,
         dim=mat.nnz,
         inputs=[mat.scalar_values, min(mat.block_shape[0], mat.block_shape[1])],
     )
     return mat
+
+
+def plot_bsr(mat: ws.BsrMatrix, ax=None, title: str = "") -> None:
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import LinearSegmentedColormap, TwoSlopeNorm
+
+    offsets = mat.offsets.numpy()
+    columns = mat.columns.numpy()
+    values = mat.scalar_values.numpy()
+    br, bc = mat.block_shape
+    dense = np.zeros((mat.nrow * br, mat.ncol * bc), dtype=np.float32)
+    for row in range(mat.nrow):
+        for k in range(offsets[row], offsets[row + 1]):
+            col = columns[k]
+            dense[row * br : (row + 1) * br, col * bc : (col + 1) * bc] = values[k]
+
+    cmap = LinearSegmentedColormap.from_list("rbg", ["red", "black", "green"])
+    abs_max = max(float(np.abs(dense).max()), 1e-8)
+    norm = TwoSlopeNorm(vcenter=0, vmin=-abs_max, vmax=abs_max)
+
+    show = ax is None
+    if show:
+        _, ax = plt.subplots()
+
+    im = ax.imshow(dense, aspect="auto", cmap=cmap, norm=norm)
+    plt.colorbar(im, ax=ax)
+    if title:
+        ax.set_title(title)
+
+    if show:
+        plt.show()
+
+
+def plot_array(arr: wp.array):
+    import matplotlib.pyplot as plt
+
+    plt.plot(arr.numpy())
+    plt.show()

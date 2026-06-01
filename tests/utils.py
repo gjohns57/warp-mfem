@@ -1,7 +1,19 @@
 import math
 from typing import Any
 
+import matplotlib.pyplot as plt
+import numpy as np
 import warp as wp
+import warp.sparse as ws
+from matplotlib.colors import LinearSegmentedColormap, TwoSlopeNorm
+
+CMAP = LinearSegmentedColormap.from_list("rbg", ["red", "black", "green"])
+
+
+def zero_norm(vmin: float, vmax: float):
+    """Norm that always maps 0 to the colormap midpoint (black) with a symmetric range."""
+    abs_max = max(abs(vmin), abs(vmax), 1e-8)
+    return TwoSlopeNorm(vcenter=0, vmin=-abs_max, vmax=abs_max)
 
 from mfem.types import vec6
 from src.mfem.kernels import precompute_rest, precompute_tet_stretch
@@ -62,36 +74,88 @@ def flatten_vec_array(array: wp.array[Any], len: int, flattened: wp.array[Any]):
         flattened[tid * stride + i] = array[tid][i]
 
 
-def flatten_array(array: wp.array, requires_grad: bool = False) -> wp.array:
-    array = array.flatten()
+def flatten_array(array: wp.array) -> wp.array:
 
     if wp.types.type_is_matrix(array.dtype) or wp.types.type_is_vector(array.dtype):
         new_shape = math.prod(array.shape) * wp.types.type_size(array.dtype)
-        return wp.array(
+
+        new_grad = None
+        if isinstance(array.grad, wp.array):
+            new_grad = wp.array(
+                ptr=array.grad.ptr,
+                dtype=array.dtype._wp_scalar_type_,
+                shape=new_shape,
+                requires_grad=False,
+            )
+            new_grad._ref = array.grad
+
+        new_array = wp.array(
             ptr=array.ptr,
+            grad=new_grad,
             dtype=array.dtype._wp_scalar_type_,
             shape=new_shape,
-            requires_grad=requires_grad,
+            requires_grad=array.requires_grad,
         )
 
+        new_array._ref = array
+        return new_array
     return array.flatten()
 
 
-def reshape_array(
-    array: wp.array, dtype: type[Any], requires_grad: bool = False
-) -> wp.array:
+def reshape_array(array: wp.array, dtype: type[Any]) -> wp.array:
     if wp.types.type_is_matrix(dtype) or wp.types.type_is_vector(dtype):
         if array.size % wp.types.type_size(dtype) != 0:
             raise ValueError(
                 f"Array size {array.size} is not a multiple of dtype size {wp.types.type_size(dtype)}"
             )
 
-        unflattened = wp.array(
+        new_shape = (array.size // wp.types.type_size(dtype),)
+        new_grad = None
+        if isinstance(array.grad, wp.array):
+            new_grad = wp.array(
+                ptr=array.grad.ptr,
+                dtype=dtype,
+                shape=new_shape,
+                requires_grad=False,
+            )
+            new_grad._ref = array.grad
+
+        new_array = wp.array(
             ptr=array.ptr,
             dtype=dtype,
-            shape=(array.size // wp.types.type_size(dtype),),
-            requires_grad=requires_grad,
+            shape=new_shape,
+            requires_grad=array.requires_grad,
+            grad=new_grad,
         )
 
-        return unflattened
+        new_array._ref = array
+        return new_array
     raise ValueError(f"Unsupported dtype: {dtype}")
+
+
+@wp.kernel
+def _bsr_to_dense_kernel(
+    offsets: wp.array[wp.int32],
+    columns: wp.array[wp.int32],
+    values: wp.array3d[wp.float32],
+    block_rows: int,
+    block_cols: int,
+    out: wp.array2d[wp.float32],
+):
+    row = wp.tid()
+    for k in range(offsets[row], offsets[row + 1]):
+        col = columns[k]
+        for i in range(block_rows):
+            for j in range(block_cols):
+                out[row * block_rows + i, col * block_cols + j] = values[k, i, j]
+
+
+def bsr_to_dense(mat: ws.BsrMatrix) -> wp.array:
+    br, bc = mat.block_shape
+    out = wp.zeros((mat.nrow * br, mat.ncol * bc), dtype=wp.float32)
+    wp.launch(
+        _bsr_to_dense_kernel,
+        dim=mat.nrow,
+        inputs=[mat.offsets, mat.columns, mat.scalar_values, br, bc, out],
+    )
+    return out

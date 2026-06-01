@@ -9,15 +9,16 @@ from .utils import frob2_sym_vec6, tr_sym_vec6
 @wp.kernel
 def energy_kernel(
     stretch: wp.array[vec6],
-    mu: wp.array[wp.float32],
-    lmbda: wp.array[wp.float32],
+    tet_materials: wp.array2d[wp.float32],
     volume: wp.array[wp.float32],
     energy: wp.array[wp.float32],
 ):
     tid = wp.tid()
+    mu = tet_materials[tid, 0]
+    lmbda = tet_materials[tid, 1]
     energy[tid] = (
         volume[tid]
-        * mu[tid]
+        * mu
         / 2.0
         * (frob2_sym_vec6(stretch[tid]) + 3.0 - 2.0 * tr_sym_vec6(stretch[tid]))
     )
@@ -66,7 +67,14 @@ class ARAPEnergy(StretchMaterialModel):
         tet_materials: wp.array2d[wp.float32],
         volume: wp.array[wp.float32],
     ):
-        return super().energy(stretch, tet_materials, volume)
+        energy = wp.empty(shape=(stretch.shape[0],), dtype=wp.float32)
+        wp.launch(
+            energy_kernel,
+            dim=stretch.shape[0],
+            inputs=[stretch, tet_materials, volume],
+            outputs=[energy],
+        )
+        return energy
 
     @staticmethod
     def gradient_ds(

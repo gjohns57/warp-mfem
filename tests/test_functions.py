@@ -1,5 +1,6 @@
 import re
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pytest
 import warp as wp
@@ -7,6 +8,7 @@ import warp.autograd as wg
 
 from simkit.simkit import polar_svd, stretch_gradient_dF
 from simkit.simkit.rotation_gradient import rotation_gradient_F
+from simkit.simkit.stretch import stretch
 from src.mfem.types import mat69, mat99, vec6
 from src.mfem.utils import (
     deformation_gradient,
@@ -17,7 +19,15 @@ from src.mfem.utils import (
     unflatten,
 )
 
-from .utils import create_single_tet_example, flatten_array, reshape_array
+from .utils import (
+    CMAP,
+    Example,
+    bsr_to_dense,
+    create_single_tet_example,
+    flatten_array,
+    reshape_array,
+    zero_norm,
+)
 
 
 @wp.kernel
@@ -98,74 +108,8 @@ def test_rotation_gradient():
         tested += 1
 
 
-# def test_stretch_gradient():
-#     rng = np.random.default_rng(0)
-#     tested = 0
-#     while tested < 20:
-#         F_cpu = rng.normal(size=(3, 3))
-#         _, s, _ = np.linalg.svd(F_cpu)
-#         if s[-1] < 0.3 or s[-2] - s[-1] < 0.3:
-#             continue
-
-#         F = wp.array(F_cpu, dtype=wp.mat33)
-#         result = wp.zeros(shape=(1,), dtype=mat99)
-#         wp.launch(
-#             helper_kernel_test_stretch_gradient, dim=1, inputs=[F], outputs=[result]
-#         )
-
-#         simkit_result = stretch_gradient_dF(F_cpu.reshape((1, 3, 3))).reshape(
-#             (3, 3, 3, 3)
-#         )
-#         warp_4d = result.numpy()[0].reshape(3, 3, 3, 3)
-
-#         assert warp_4d == pytest.approx(simkit_result, abs=1e-3)
-#         tested += 1
-
-
 @wp.kernel
-def helper_kernel_test_stretch_gradient2(
-    A: wp.array[wp.mat33], result: wp.array[mat69]
-):
-    tid = wp.tid()
-
-    result[tid] = stretch_gradient(A[tid])
-
-
-def test_stretch_gradient():
-    rng = np.random.default_rng(0)
-    tested = 0
-    while tested < 20:
-        F_cpu = rng.normal(size=(3, 3))
-        _, s, _ = np.linalg.svd(F_cpu)
-        if s[-1] < 0.3 or s[-2] - s[-1] < 0.3:
-            continue
-
-        F = wp.array(F_cpu, dtype=wp.mat33)
-        result = wp.zeros(shape=(1,), dtype=mat69)
-        wp.launch(
-            helper_kernel_test_stretch_gradient2,
-            dim=1,
-            inputs=[F],
-            outputs=[result],
-        )
-
-        simkit_result = stretch_gradient_dF(F_cpu.reshape((1, 3, 3))).reshape(
-            3, 3, 3, 3
-        )
-        reshaped_simkit = np.zeros((6, 9))
-
-        for i in range(3):
-            for j in range(3):
-                reshaped_simkit[:, i * 3 + j] = simkit_result[i, j].reshape((9,))[
-                    [0, 4, 8, 1, 2, 5]
-                ]
-
-        tested += 1
-        assert result.numpy()[0] == pytest.approx(reshaped_simkit, abs=1e-4)
-
-
-@wp.kernel
-def stretch_gradient_fd_test_deformation_gradient_kernel(
+def _stretch_gradient_fd_test_deformation_gradient_kernel(
     position: wp.array[wp.vec3],
     tets: wp.array2d[wp.int32],
     rest: wp.array[wp.mat33],
@@ -177,7 +121,7 @@ def stretch_gradient_fd_test_deformation_gradient_kernel(
 
 
 @wp.kernel
-def stretch_gradient_fd_test_stretch_gradient(
+def _stretch_gradient_fd_test_stretch_gradient(
     def_grad: wp.array[wp.mat33],
     result: wp.array[mat69],
 ):
@@ -187,7 +131,7 @@ def stretch_gradient_fd_test_stretch_gradient(
 
 
 @wp.kernel
-def stretch_gradient_fd_test_stretch(
+def _stretch_gradient_fd_test_stretch(
     deformation_gradient: wp.array[wp.mat33],
     result: wp.array[vec6],
 ):
@@ -196,97 +140,92 @@ def stretch_gradient_fd_test_stretch(
     result[tid] = sym_mat33_to_vec6(stretch_component(deformation_gradient[tid]))
 
 
-def compute_stretch(deformation_gradient: wp.array[wp.float32]) -> wp.array[wp.float32]:
+def _compute_stretch(
+    deformation_gradient: wp.array[wp.float32],
+) -> wp.array[wp.float32]:
     deformation_gradient = reshape_array(deformation_gradient, wp.mat33)
 
     stretch = wp.zeros(
         shape=(deformation_gradient.shape[0],), dtype=vec6, requires_grad=True
     )
     wp.launch(
-        stretch_gradient_fd_test_stretch,
+        _stretch_gradient_fd_test_stretch,
         dim=deformation_gradient.shape[0],
         inputs=[deformation_gradient],
         outputs=[stretch],
     )
 
-    return flatten_array(stretch, requires_grad=True)
+    return flatten_array(stretch)
+
+
+def _make_deformed_example(deformation: np.ndarray) -> Example:
+    base = np.array(
+        [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+    )
+    position = wp.array(base @ deformation.T, dtype=wp.vec3)
+    tets = wp.array2d([[0, 1, 2, 3]], dtype=wp.int32)
+    return Example(position=position, tets=tets)
 
 
 def test_stretch_gradient_fd():
-    example = create_single_tet_example()
+    rng = np.random.default_rng(42)
+    deformations = [np.eye(3)] + [
+        rng.normal(size=(3, 3)) * 0.3 + np.eye(3) for _ in range(4)
+    ]
+    examples = [_make_deformed_example(d) for d in deformations]
 
-    deformation_gradient = wp.zeros(shape=(1,), dtype=wp.mat33)
-    wp.launch(
-        stretch_gradient_fd_test_deformation_gradient_kernel,
-        dim=1,
-        inputs=[example.position, example.tets, example.rest],
-        outputs=[deformation_gradient],
-    )
+    rows = []
+    for example in examples:
+        deformation_gradient = wp.zeros(shape=(1,), dtype=wp.mat33, requires_grad=True)
+        wp.launch(
+            _stretch_gradient_fd_test_deformation_gradient_kernel,
+            dim=1,
+            inputs=[example.position, example.tets, example.rest],
+            outputs=[deformation_gradient],
+        )
 
-    stretch_gradient = wp.zeros(shape=example.n_tets, dtype=mat69)
-    wp.launch(
-        stretch_gradient_fd_test_stretch_gradient,
-        dim=1,
-        inputs=[deformation_gradient],
-        outputs=[stretch_gradient],
-    )
+        stretch_gradient = wp.zeros(shape=example.n_tets, dtype=mat69)
+        wp.launch(
+            _stretch_gradient_fd_test_stretch_gradient,
+            dim=1,
+            inputs=[deformation_gradient],
+            outputs=[stretch_gradient],
+        )
 
-    flat_def_gradient = flatten_array(deformation_gradient, requires_grad=True)
-    jacobian = wg.jacobian_fd(
-        compute_stretch,
-        inputs=[flat_def_gradient],
-        input_output_mask=[(0, 0)],
-    )
+        flat_def_gradient = flatten_array(deformation_gradient)
+        jacobian = wg.jacobian_fd(
+            _compute_stretch,
+            inputs=[flat_def_gradient],
+            input_output_mask=[(0, 0)],
+        )
 
-    print(jacobian[(0, 0)])
+        fd = jacobian[(0, 0)].numpy()
+        analytical = stretch_gradient.numpy()[0]
+        rows.append((fd, analytical))
 
-    assert False
-    assert stretch_gradient.numpy()[0].shape == (6, 9)
+        assert analytical.shape == (6, 9)
+        assert analytical == pytest.approx(fd, abs=2e-2)
 
+    diffs = [fd - analytical for fd, analytical in rows]
+    global_abs_max = max(max(np.abs(d).max(), 1e-8) for d in diffs)
+    diff_norm = zero_norm(-global_abs_max, global_abs_max)
 
-def test_flatten_array():
-    a = wp.array(
-        [
-            [1.0, 2.0, 3.0],
-            [4.0, 5.0, 6.0],
-            [7.0, 8.0, 9.0],
-        ],
-        dtype=wp.mat33,
-    )
-    flattened = flatten_array(a)
+    n = len(rows)
+    fig, axes = plt.subplots(n, 3, figsize=(18, 4 * n))
+    for i, ((fd, analytical), diff) in enumerate(zip(rows, diffs)):
+        vmin = min(fd.min(), analytical.min())
+        vmax = max(fd.max(), analytical.max())
 
-    assert flattened.numpy().shape == a.numpy().flatten().shape
-    assert (flattened.numpy() == a.numpy().flatten()).all()
+        row_axes = axes[i] if n > 1 else axes
+        im0 = row_axes[0].imshow(fd, aspect="auto", cmap=CMAP, norm=zero_norm(vmin, vmax))
+        row_axes[0].set_title(f"Sample {i}: FD Jacobian")
+        fig.colorbar(im0, ax=row_axes[0])
+        im1 = row_axes[1].imshow(analytical, aspect="auto", cmap=CMAP, norm=zero_norm(vmin, vmax))
+        row_axes[1].set_title(f"Sample {i}: Analytical stretch gradient")
+        fig.colorbar(im1, ax=row_axes[1])
+        im2 = row_axes[2].imshow(diff, aspect="auto", cmap=CMAP, norm=diff_norm)
+        row_axes[2].set_title(f"Sample {i}: Difference (FD - analytical)")
+        fig.colorbar(im2, ax=row_axes[2])
 
-
-def test_unflatten_array():
-    a = wp.array(
-        [
-            1.0,
-            2.0,
-            3.0,
-            4.0,
-            5.0,
-            6.0,
-            7.0,
-            8.0,
-            9.0,
-        ],
-        dtype=wp.float32,
-    )
-    unflattened = reshape_array(a, wp.mat33)
-
-    b = wp.array(
-        [
-            [1.0, 2.0, 3.0],
-            [4.0, 5.0, 6.0],
-            [7.0, 8.0, 9.0],
-        ],
-        dtype=wp.mat33,
-    )
-
-    assert unflattened.numpy().shape == b.numpy().shape
-    assert (unflattened.numpy() == b.numpy()).all()
-
-    # assert unflattened.numpy().shape == a.numpy().shape
-    # assert (unflattened.numpy() == a.numpy()).all()
+    plt.tight_layout()
+    plt.savefig("stretch_gradient.png")

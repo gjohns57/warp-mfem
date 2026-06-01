@@ -60,9 +60,9 @@ class Example:
                 cell_x=cell_size,
                 cell_y=cell_size,
                 cell_z=cell_size,
-                density=1.0e3,
-                k_mu=1.0e5,
-                k_lambda=1.0e5,
+                density=1.0e-3,
+                k_mu=1.0e1,
+                k_lambda=1.0e1,
                 k_damp=k_damp,
                 fix_left=True,
             )
