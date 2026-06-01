@@ -74,8 +74,6 @@ class MFEMSolver(SolverBase):
         wp.synchronize()
         print("precompute rest done")
 
-        self._test_deform()
-
         mass_diag = None
         if self.model.particle_mass is not None:
             mass_diag = (
@@ -190,22 +188,22 @@ class MFEMSolver(SolverBase):
     def _kinetic_hessian_dx(self, _state: State, dt: float) -> wp.array:
         return self.model.mass_matrix
 
-    # TODO: fix block dimensions
     def _constraint_gradient_ds_inverse(self, state: State, dt: float) -> ws.BsrMatrix:
+        # G_s = dc/ds = -D where D = diag(1,1,1,2,2,2), so G_si = D^{-1} = diag(1,1,1,0.5,0.5,0.5)
         return ws.bsr_diag(
-            wp.diag(vec6(0.5, 0.5, 0.5, 1.0, 1.0, 1.0)),
+            wp.diag(vec6(1.0, 1.0, 1.0, 0.5, 0.5, 0.5)),
             self.model.tet_count,
             block_type=mat66,
         )
 
-    def _constraint_gradient_dx(self, state: State, dt: float) -> ws.BsrMatrix:
+    def _constraint_gradient_dx(self, x: wp.array, dt: float) -> ws.BsrMatrix:
 
         values = wp.zeros(self.model.tet_count * 4, dtype=mat63)
 
         wp.launch(
             evaluate_constraint_gradient_dx,
             dim=self.model.tet_count,
-            inputs=[state.particle_q, self.model.tet_indices, self.model.tet_poses],
+            inputs=[x, self.model.tet_indices, self.model.tet_poses],
             outputs=[values],
         )
 
@@ -259,7 +257,7 @@ class MFEMSolver(SolverBase):
         kinetic_hessian = self._kinetic_hessian_dx(state, dt)
         elastic_hessian = self._elastic_hessian_ds(state, s, dt)
         constraint_gradient_ds_inverse = self._constraint_gradient_ds_inverse(state, dt)
-        constraint_gradient_dx = self._constraint_gradient_dx(state, dt)
+        constraint_gradient_dx = self._constraint_gradient_dx(x, dt)
 
         return (
             kinetic_hessian,
@@ -273,7 +271,6 @@ class MFEMSolver(SolverBase):
         state: State,
         x: wp.array[wp.vec3],
         s: wp.array[vec6],
-        lmbda: wp.array[vec6],
         x_tilde: wp.array[wp.vec3],
         dt: float,
     ) -> float:
@@ -297,15 +294,11 @@ class MFEMSolver(SolverBase):
             )
         )
         print(f"elastic_energy: {elastic_energy}")
-        constraints = self._constraints(state, x, s).numpy().reshape((-1, 6, 1))
-        lagrange_multipliers = lmbda.numpy().reshape((-1, 6, 1)).transpose((0, 2, 1))
-        diag = np.diag([1.0, 1.0, 1.0, 2.0, 2.0, 2.0])
-        constraint_energy = (
-            lagrange_multipliers * diag[np.newaxis, :, :] * constraints
-        ).sum()
-        print(f"constraint_energy: {-constraint_energy}")
+        constraints = self._constraints(state, x, s).numpy().flatten()
+        constraint_norm = np.linalg.norm(constraints)
+        print(f"constraint_norm: {constraint_norm:.6e}")
 
-        return kinetic_energy + elastic_energy - constraint_energy
+        return kinetic_energy + elastic_energy
 
     def _line_search(self, dx, ds, lmbda) -> float:
         return 1.0
@@ -398,6 +391,7 @@ class MFEMSolver(SolverBase):
 
             invert_diagonal_bsr(HsGsi)
 
+            # g_lmbda = c + D Hs^{-1} g_s  (= ĝ_λ in Schur complement derivation)
             g_lmbda = constraint + HsGsi @ g_s
 
             GxtHlmbda = ws.bsr_mm(
@@ -406,7 +400,6 @@ class MFEMSolver(SolverBase):
                 work_arrays=self._work_arrays["GxtHlmbda"],
                 reuse_topology=reuse_topology,
             )
-            # plot_bsr(GxtHlmbda)
 
             GxtHlmbdaGx = ws.bsr_mm(
                 GxtHlmbda,
@@ -415,8 +408,8 @@ class MFEMSolver(SolverBase):
                 work_arrays=self._work_arrays["GxtHlmbdaGx"],
             )
             H = H_x + GxtHlmbdaGx
-            plot_bsr(H)
-            g = GxtHlmbda @ g_lmbda - g_x
+            # RHS: -(g_x + Gx^T Hλ ĝλ)
+            g = -GxtHlmbda @ g_lmbda - g_x
             self._lhs = H
             self._rhs = g
 
@@ -439,10 +432,10 @@ class MFEMSolver(SolverBase):
             # print(self._lhs)
 
         with wp.ScopedTimer("Local solve", active=timer):
-            Hsi = invert_diagonal_bsr(H_s)
-            # G_s = invert_diagonal_bsr(G_si)
-            lmbda = -H_lmbda @ (g_lmbda + G_x @ dx)
-            ds = -Hsi @ (G_si @ lmbda + g_s)
+            # Δλ = Hλ(ĝλ + Gx Δx)
+            lmbda = H_lmbda @ (g_lmbda + G_x @ dx)
+            # Δs = D^{-1}(c + Gx Δx)  — from KKT row 3: Gx Δx - D Δs = -c
+            ds = G_si @ (constraint + G_x @ dx)
 
         alpha = self._line_search(dx, ds, lmbda)
         return x + alpha * dx, s + alpha * ds, lmbda
@@ -461,8 +454,8 @@ class MFEMSolver(SolverBase):
         x_tilde = x + state_in.particle_qd * dt
 
         for i in range(self.solver_iterations):
-            energy = self._energy(state_in, x, s, lmbda, x_tilde, dt)
-            print(f"Iteration {i}, energy: {energy}")
+            energy = self._energy(state_in, x, s, x_tilde, dt)
+            print(f"Iteration {i}, energy: {energy:.6e}")
 
             with wp.ScopedTimer("Iteration " + str(i)):
                 x, s, lmbda = self._solver_iteration(

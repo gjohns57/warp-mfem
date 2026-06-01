@@ -37,9 +37,8 @@ def precompute_rest(
     x2 = particle_q[tets[tid, 2]]
     x3 = particle_q[tets[tid, 3]]
 
-    # I am not sure whether it is worth storing the volume since it can be computed
-    # easily from the rest pose
-    edge_matrix = wp.matrix_from_rows(x1 - x0, x2 - x0, x3 - x0)
+    # Store D_m = [x1-x0 | x2-x0 | x3-x0] as column vectors so F = Ds * D_m^{-1} = I at rest
+    edge_matrix = wp.matrix_from_cols(x1 - x0, x2 - x0, x3 - x0)
     rest[tid] = wp.inverse(edge_matrix)
     volume[tid] = wp.abs(wp.determinant(edge_matrix)) / 6.0
 

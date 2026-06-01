@@ -1,5 +1,3 @@
-from tkinter.constants import N
-
 import numpy as np
 import warp as wp
 import warp.sparse as ws
