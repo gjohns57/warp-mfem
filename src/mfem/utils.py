@@ -1,10 +1,8 @@
-from tkinter.constants import N
-
 import numpy as np
 import warp as wp
 import warp.sparse as ws
 
-from .types import mat69, mat99, mat912, vec6, vec9
+from .types import mat66, mat69, mat99, mat912, vec6, vec9
 
 """
 Utilities for MFEM elastic energy functions:
@@ -59,6 +57,40 @@ def frob2_sym_vec6(vec: vec6) -> wp.float32:
         + vec[2] * vec[2]
         + 2.0 * (vec[3] * vec[3] + vec[4] * vec[4] + vec[5] * vec[5])
     )
+
+
+@wp.func
+def det_sym_vec6(s: vec6) -> wp.float32:
+    return (s[0] * s[1] * s[2] + 2.0 * s[3] * s[4] * s[5]) - (
+        s[1] * s[4] * s[4] + s[0] * s[5] * s[5] + s[2] * s[3] * s[3]
+    )
+
+
+@wp.func
+def grad_det_sym_vec6(s: vec6) -> vec6:
+    return vec6(
+        s[1] * s[2] - s[5] * s[5],
+        s[0] * s[2] - s[4] * s[4],
+        s[0] * s[1] - s[3] * s[3],
+        2.0 * (s[4] * s[5] - s[2] * s[3]),
+        2.0 * (s[3] * s[5] - s[1] * s[4]),
+        2.0 * (s[3] * s[4] - s[0] * s[5]),
+    )
+
+
+# fmt: off
+@wp.func
+def hess_det_sym_vec6(s: vec6) -> mat66:
+    return mat66(
+        0.0,            s[2],           s[1],           0.0,            0.0,            -2.0 * s[5],
+        s[2],           0.0,            s[0],           0.0,            -2.0 * s[4],    0.0,
+        s[1],           s[0],           0.0,            -2.0 * s[3],    0.0,            0.0,
+        0.0,            0.0,            -2.0 * s[3],    -2.0 * s[2],    2.0 * s[5],     2.0 * s[4],
+        0.0,            -2.0 * s[4],    0.0,            2.0 * s[5],     -2.0 * s[1],    2.0 * s[3],
+        -2.0 * s[5],    0.0,            0.0,            2.0 * s[4],     2.0 * s[3],     -2.0 * s[0]
+
+    )
+# fmt: on
 
 
 @wp.func

@@ -21,27 +21,19 @@ def precompute_tet_stretch(
 
     F = deformation_gradient(particle_q, tets, rest, tid)
     tet_stretch[tid] = sym_mat33_to_vec6(stretch_component(F))
+    #
+    # tet_stretch[tid] = vec6(1.0, 1.0, 1.0, 0.0, 0.0, 0.0)
 
 
 @wp.kernel
-def precompute_rest(
-    particle_q: wp.array[wp.vec3],
-    tets: wp.array2d[wp.int32],
+def precompute_rest_volumes(
     rest: wp.array[wp.mat33],
     volume: wp.array[wp.float32],
 ):
     tid = wp.tid()
 
-    x0 = particle_q[tets[tid, 0]]
-    x1 = particle_q[tets[tid, 1]]
-    x2 = particle_q[tets[tid, 2]]
-    x3 = particle_q[tets[tid, 3]]
-
-    # I am not sure whether it is worth storing the volume since it can be computed
-    # easily from the rest pose
-    edge_matrix = wp.matrix_from_rows(x1 - x0, x2 - x0, x3 - x0)
-    rest[tid] = wp.inverse(edge_matrix)
-    volume[tid] = wp.abs(wp.determinant(edge_matrix)) / 6.0
+    # rest[tid] is the inverse of the edge matrix
+    volume[tid] = 1.0 / (wp.abs(wp.determinant(rest[tid])) * 6.0)
 
 
 @wp.kernel
@@ -115,7 +107,17 @@ def evaluate_constraints(
     s = stretch[tid]
 
     F = deformation_gradient(particle_q, tets, rest, tid)
+    # print("F:")
+    # print(F[0, :])
+    # print(F[1, :])
+    # print(F[2, :])
+
+
     stretch_grad = sym_mat33_to_vec6(stretch_component(F))
+    # print("stretch:")
+    # print(stretch_grad)
+    # print("s")
+    # print(s)
 
     constraint[tid] = wp.diag(vec6(1.0, 1.0, 1.0, 2.0, 2.0, 2.0)) * (stretch_grad - s)
 
@@ -154,6 +156,23 @@ def evaluate_constraint_gradient_dx(
 @wp.kernel
 def test_deform_kernel(x: wp.array[wp.vec3]):
     tid = wp.tid()
-    shear = wp.mat33(1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 1.0)
+    shear = wp.mat33(1.0, 0.0, 0.0, 0.0, 1.0, 2.0, 0.0, 0.0, 1.0)
 
     x[tid] = shear * x[tid]
+
+
+@wp.kernel
+def project_position(
+    particle_q: wp.array[wp.vec3],
+    particle_qd: wp.array[wp.vec3],
+    gravity: wp.array[wp.vec3],
+    particle_f: wp.array[wp.vec3],
+    x_tilde: wp.array[wp.vec3],
+    dt: float,
+):
+    tid = wp.tid()
+    g = gravity[0]  # Use world 0 gravity whatever that means
+
+
+    x_tilde[tid] = (particle_q[tid] + particle_qd[tid] * dt + 0.5 * (particle_f[tid] + g) * dt * dt)
+

@@ -13,7 +13,16 @@ from mfem.kernels import (
 )
 from mfem.types import mat63, vec6
 
-from .utils import CMAP, Example, bsr_to_dense, zero_norm
+from .utils import (
+    CMAP,
+    Example,
+    bsr_to_dense,
+    create_cube_example,
+    create_single_tet_example,
+    flatten_array,
+    reshape_array,
+    zero_norm,
+)
 
 # from mfem.kernels import *
 
@@ -114,101 +123,17 @@ def flattened_evaluate_constraint(
     n_particles: int,
 ) -> wp.array2d[wp.float32]:
 
-    constraint = wp.zeros((n_tets, 6), dtype=wp.float32, requires_grad=True)
-
-    constraints_vec = wp.zeros(n_tets, dtype=vec6)
-    position_vec = wp.zeros(n_particles, dtype=wp.vec3, requires_grad=True)
-
-    wp.launch(
-        array2d_to_vec3_array,
-        dim=position.shape[0],
-        inputs=[position, position_vec],
-    )
+    constraint = wp.empty(n_tets, dtype=vec6, requires_grad=True)
+    position_vec = reshape_array(position, wp.vec3)
 
     wp.launch(
         evaluate_constraints,
-        dim=1,
+        dim=n_tets,
         inputs=[position_vec, stretch, tets, rest],
-        outputs=[constraints_vec],
-    )
-    wp.launch(
-        vec6_array_to_array2d,
-        dim=1,
-        inputs=[constraints_vec],
         outputs=[constraint],
     )
 
-    return constraint
-
-
-def test_constraint_gradient_dx():
-    # Unit tet: x0 at origin, edges along coordinate axes
-    og_position = np.array(
-        [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
-    )
-
-    n_tets = 1
-    n_particles = 4
-
-    position = wp.array(og_position, dtype=wp.vec3, requires_grad=True)
-    position_array2d = wp.array2d(og_position, dtype=wp.float32, requires_grad=True)
-    stretch = wp.array([1.0, 1.0, 1.0, 0.0, 0.0, 0.0], dtype=vec6)
-    tets = wp.array2d([[0, 1, 2, 3]], dtype=wp.int32)
-
-    cpu_rest = np.hstack(
-        [
-            og_position[1] - og_position[0],
-            og_position[2] - og_position[0],
-            og_position[3] - og_position[0],
-        ]
-    ).reshape(3, 3)
-    rest = wp.array(np.linalg.inv(cpu_rest), dtype=wp.mat33)
-
-    row_idx = wp.zeros(n_tets * 4, dtype=wp.int32)
-    col_idx = wp.zeros(n_tets * 4, dtype=wp.int32)
-
-    wp.launch(
-        precompute_bsr_topology,
-        dim=n_tets,
-        inputs=[tets],
-        outputs=[row_idx, col_idx],
-    )
-
-    values = wp.zeros(n_tets * 4, dtype=mat63)
-
-    wp.launch(
-        evaluate_constraint_gradient_dx,
-        dim=n_tets,
-        inputs=[position, tets, rest],
-        outputs=[values],
-    )
-
-    # bsr_from_triplets expects int32, kernel writes uint32
-    rows_int = wp.array(row_idx.numpy(), dtype=wp.int32)
-    cols_int = wp.array(col_idx.numpy(), dtype=wp.int32)
-
-    bsr = ws.bsr_from_triplets(
-        n_tets, n_particles, rows_int, cols_int, values, prune_numerical_zeros=False
-    )
-
-    jacobians = wg.jacobian_fd(
-        flattened_evaluate_constraint,
-        inputs=[position_array2d, stretch, tets, rest, n_tets, n_particles],
-        dim=(n_tets,),
-    )
-
-    dense_bsr = bsr_to_dense(bsr)
-    print(jacobians[(0, 0)].numpy())
-    assert dense_bsr.numpy() == pytest.approx(jacobians[(0, 0)].numpy(), rel=1e-1)
-
-
-def _make_constraint_example(deformation: np.ndarray) -> Example:
-    base = np.array(
-        [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
-    )
-    position = wp.array(base @ deformation.T, dtype=wp.vec3)
-    tets = wp.array2d([[0, 1, 2, 3]], dtype=wp.int32)
-    return Example(position=position, tets=tets)
+    return flatten_array(constraint)
 
 
 def test_constraint_gradient_dx_visual():
@@ -219,7 +144,7 @@ def test_constraint_gradient_dx_visual():
 
     rows = []
     for deformation in deformations:
-        example = _make_constraint_example(deformation)
+        example = create_single_tet_example(deformation)
         n_tets = example.n_tets
         n_particles = example.n_particles
 
@@ -245,13 +170,10 @@ def test_constraint_gradient_dx_visual():
         )
         analytical = bsr_to_dense(bsr).numpy()
 
-        position_2d = wp.array2d(
-            example.position.numpy(), dtype=wp.float32, requires_grad=True
-        )
         jacobians = wg.jacobian_fd(
             flattened_evaluate_constraint,
             inputs=[
-                position_2d,
+                flatten_array(example.position),
                 example.stretch,
                 example.tets,
                 example.rest,
@@ -275,10 +197,14 @@ def test_constraint_gradient_dx_visual():
         vmax = max(analytical.max(), fd.max())
 
         row_axes = axes[i] if n > 1 else axes
-        im0 = row_axes[0].imshow(analytical, aspect="auto", cmap=CMAP, norm=zero_norm(vmin, vmax))
+        im0 = row_axes[0].imshow(
+            analytical, aspect="auto", cmap=CMAP, norm=zero_norm(vmin, vmax)
+        )
         row_axes[0].set_title(f"Sample {i}: Analytical gradient")
         fig.colorbar(im0, ax=row_axes[0])
-        im1 = row_axes[1].imshow(fd, aspect="auto", cmap=CMAP, norm=zero_norm(vmin, vmax))
+        im1 = row_axes[1].imshow(
+            fd, aspect="auto", cmap=CMAP, norm=zero_norm(vmin, vmax)
+        )
         row_axes[1].set_title(f"Sample {i}: FD Jacobian")
         fig.colorbar(im1, ax=row_axes[1])
         im2 = row_axes[2].imshow(diff, aspect="auto", cmap=CMAP, norm=diff_norm)
@@ -289,42 +215,7 @@ def test_constraint_gradient_dx_visual():
     plt.savefig("constraint_gradient_dx.png")
 
     for analytical, fd in rows:
-        assert analytical == pytest.approx(fd, abs=2e22)
-
-
-def _flattened_constraints_multi(
-    position: wp.array[wp.float32],
-    stretch: wp.array[vec6],
-    tets: wp.array2d[wp.int32],
-    rest: wp.array[wp.mat33],
-    n_tets: int,
-    n_particles: int,
-) -> wp.array2d[wp.float32]:
-    constraint = wp.zeros((n_tets, 6), dtype=wp.float32, requires_grad=True)
-    constraints_vec = wp.zeros(n_tets, dtype=vec6)
-    position_vec = wp.zeros(n_particles, dtype=wp.vec3)
-
-    wp.launch(array2d_to_vec3_array, dim=n_particles, inputs=[position, position_vec])
-    wp.launch(
-        evaluate_constraints,
-        dim=n_tets,
-        inputs=[position_vec, stretch, tets, rest],
-        outputs=[constraints_vec],
-    )
-    wp.launch(
-        vec6_array_to_array2d, dim=n_tets, inputs=[constraints_vec], outputs=[constraint]
-    )
-    return constraint
-
-
-def _create_cube_example(deformation: np.ndarray) -> Example:
-    corners = np.array(
-        [[x, y, z] for x in [0.0, 1.0] for y in [0.0, 1.0] for z in [0.0, 1.0]]
-    )
-    tri = scipy.spatial.Delaunay(corners)
-    position = wp.array(corners @ deformation.T, dtype=wp.vec3)
-    tets = wp.array2d(tri.simplices.astype(np.int32), dtype=wp.int32)
-    return Example(position=position, tets=tets)
+        assert analytical == pytest.approx(fd, abs=5e-2)
 
 
 def test_cube_constraint_gradient_dx_visual():
@@ -335,7 +226,7 @@ def test_cube_constraint_gradient_dx_visual():
 
     rows = []
     for deformation in deformations:
-        example = _create_cube_example(deformation)
+        example = create_cube_example(deformation)
         n_tets = example.n_tets
         n_particles = example.n_particles
 
@@ -360,21 +251,16 @@ def test_cube_constraint_gradient_dx_visual():
             n_tets, n_particles, row_idx, col_idx, values, prune_numerical_zeros=False
         )
         analytical = bsr_to_dense(bsr).numpy()
-
-        position_2d = wp.array2d(
-            example.position.numpy(), dtype=wp.float32, requires_grad=True
-        )
         jacobians = wg.jacobian_fd(
-            _flattened_constraints_multi,
+            flattened_evaluate_constraint,
             inputs=[
-                position_2d,
+                flatten_array(example.position),
                 example.stretch,
                 example.tets,
                 example.rest,
                 n_tets,
                 n_particles,
             ],
-            input_output_mask=[(0, 0)],
         )
         fd = jacobians[(0, 0)].numpy()
 
@@ -387,14 +273,18 @@ def test_cube_constraint_gradient_dx_visual():
     n = len(rows)
     fig, axes = plt.subplots(n, 3, figsize=(18, 4 * n))
     for i, ((analytical, fd), diff) in enumerate(zip(rows, diffs)):
-        vmin = min(analytical.min(), fd.min())
-        vmax = max(analytical.max(), fd.max())
+        vmin = min(analytical.min(), 0.0)
+        vmax = max(analytical.max(), 0.0)
 
         row_axes = axes[i] if n > 1 else axes
-        im0 = row_axes[0].imshow(analytical, aspect="auto", cmap=CMAP, norm=zero_norm(vmin, vmax))
+        im0 = row_axes[0].imshow(
+            analytical, aspect="auto", cmap=CMAP, norm=zero_norm(vmin, vmax)
+        )
         row_axes[0].set_title(f"Sample {i}: Analytical gradient")
         fig.colorbar(im0, ax=row_axes[0])
-        im1 = row_axes[1].imshow(fd, aspect="auto", cmap=CMAP, norm=zero_norm(vmin, vmax))
+        im1 = row_axes[1].imshow(
+            fd, aspect="auto", cmap=CMAP, norm=zero_norm(vmin, vmax)
+        )
         row_axes[1].set_title(f"Sample {i}: FD Jacobian")
         fig.colorbar(im1, ax=row_axes[1])
         im2 = row_axes[2].imshow(diff, aspect="auto", cmap=CMAP, norm=diff_norm)
@@ -403,3 +293,6 @@ def test_cube_constraint_gradient_dx_visual():
 
     plt.tight_layout()
     plt.savefig("cube_constraint_gradient_dx.png")
+
+    for i, (analytical, fd) in enumerate(rows):
+        assert analytical == pytest.approx(fd, abs=1e-2)

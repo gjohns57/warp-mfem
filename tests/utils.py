@@ -3,6 +3,7 @@ from typing import Any
 
 import matplotlib.pyplot as plt
 import numpy as np
+import scipy.spatial
 import warp as wp
 import warp.sparse as ws
 from matplotlib.colors import LinearSegmentedColormap, TwoSlopeNorm
@@ -14,6 +15,7 @@ def zero_norm(vmin: float, vmax: float):
     """Norm that always maps 0 to the colormap midpoint (black) with a symmetric range."""
     abs_max = max(abs(vmin), abs(vmax), 1e-8)
     return TwoSlopeNorm(vcenter=0, vmin=-abs_max, vmax=abs_max)
+
 
 from mfem.types import vec6
 from src.mfem.kernels import precompute_rest, precompute_tet_stretch
@@ -44,34 +46,23 @@ class Example:
         )
 
 
-def create_single_tet_example() -> Example:
-    position = wp.array(
-        [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
-        dtype=wp.vec3,
+def create_single_tet_example(deformation: np.ndarray = np.eye(3)) -> Example:
+    base = np.array(
+        [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
     )
+    position = wp.array(base @ deformation.T, dtype=wp.vec3, requires_grad=True)
     tets = wp.array2d([[0, 1, 2, 3]], dtype=wp.int32)
     return Example(position=position, tets=tets)
 
 
-@wp.kernel
-def flatten_mat_array(
-    array: wp.array[Any], rows: int, cols: int, flattened: wp.array[Any]
-):
-    tid = wp.tid()
-    stride = rows * cols
-
-    for i in range(rows):
-        for j in range(cols):
-            flattened[tid * stride + i * cols + j] = array[tid][i, j]
-
-
-@wp.kernel
-def flatten_vec_array(array: wp.array[Any], len: int, flattened: wp.array[Any]):
-    tid = wp.tid()
-    stride = len
-
-    for i in range(len):
-        flattened[tid * stride + i] = array[tid][i]
+def create_cube_example(deformation: np.ndarray) -> Example:
+    corners = np.array(
+        [[x, y, z] for x in [0.0, 1.0] for y in [0.0, 1.0] for z in [0.0, 1.0]]
+    )
+    tri = scipy.spatial.Delaunay(corners)
+    position = wp.array(corners @ deformation.T, dtype=wp.vec3, requires_grad=True)
+    tets = wp.array2d(tri.simplices.astype(np.int32), dtype=wp.int32)
+    return Example(position=position, tets=tets)
 
 
 def flatten_array(array: wp.array) -> wp.array:
