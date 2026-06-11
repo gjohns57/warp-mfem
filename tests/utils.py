@@ -18,7 +18,23 @@ def zero_norm(vmin: float, vmax: float):
 
 
 from mfem.types import vec6
-from src.mfem.kernels import precompute_rest, precompute_tet_stretch
+from mfem.kernels import precompute_tet_stretch
+
+@wp.kernel
+def precompute_rest(
+    particle_q: wp.array[wp.vec3],
+    tets: wp.array2d[wp.int32],
+    rest: wp.array[wp.mat33]
+):
+    tid = wp.tid()
+
+    x0 = particle_q[tets[tid, 0]]
+    x1 = particle_q[tets[tid, 1]]
+    x2 = particle_q[tets[tid, 2]]
+    x3 = particle_q[tets[tid, 3]]
+
+    edge_matrix = wp.matrix_from_rows(x1 - x0, x2 - x0, x3 - x0)
+    rest[tid] = wp.inverse(edge_matrix)
 
 
 class Example:

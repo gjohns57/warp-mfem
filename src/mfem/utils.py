@@ -1,3 +1,5 @@
+from typing import Any
+
 import numpy as np
 import warp as wp
 import warp.sparse as ws
@@ -14,6 +16,8 @@ I found this awesome guide: https://www.tkim.graphics/DYNAMIC_DEFORMABLES/Dynami
 #     """Symmetric 3x3 matrix stored as a 6-element vector."""
 
 # vec6 = wp.vector(length=6, dtype=wp.float32)
+
+SUM_TILE_SIZE = 256
 
 
 @wp.func
@@ -334,3 +338,18 @@ def plot_array(arr: wp.array):
 
     plt.plot(arr.numpy())
     plt.show()
+
+
+def linear_accumulate(a: wp.array, b: wp.array, alpha: float = 1.0, beta: float = 1.0):
+    wp.launch(_linear_accumulate, dim=a.shape[0], inputs=[b, alpha, beta], outputs=[a])
+
+
+@wp.kernel
+def _linear_accumulate(
+    b: wp.array[Any],
+    alpha: wp.float32,
+    beta: wp.float32,
+    a: wp.array[Any],
+):
+    tid = wp.tid()
+    a[tid] = alpha * a[tid] + beta * b[tid]

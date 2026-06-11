@@ -3,19 +3,25 @@
 
 from typing import override
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import warp as wp
 import warp.sparse as ws
 from newton import Contacts, Control, Model, State
+from newton._src.solvers.kamino.config import dataclass
 from newton.solvers import SolverBase
 from warp.optim.linear import cg
 
+from mfem.accumulate import TiledAccumulator
 from mfem.boundary_condition import DirichletBoundaryCondition
 
+from .energies.material_model import StretchMaterialModel
 from .kernels import (
+    constraint_objective_kernel,
     evaluate_constraint_gradient_dx,
     evaluate_constraints,
+    kinetic_objective_kernel,
     precompute_bsr_topology,
     precompute_mass_matrix,
     precompute_rest_volumes,
@@ -23,9 +29,9 @@ from .kernels import (
     project_position,
     test_deform_kernel,
 )
-from .material_model import StretchMaterialModel
+from .line_search import backtracking_line_search
 from .types import mat63, mat66, vec6
-from .utils import invert_diagonal_bsr
+from .utils import linear_accumulate
 
 
 class MFEMSolver(SolverBase):
@@ -37,6 +43,7 @@ class MFEMSolver(SolverBase):
         record_energy: bool = False,
         debug_logs: bool = False,
         fix_indices: np.ndarray | None = None,
+        line_search: bool = True,
     ):
         super().__init__(model)
 
@@ -44,16 +51,15 @@ class MFEMSolver(SolverBase):
         self._material_model = material_model
         self._bsr_work_arrays = {
             "HsGsi": ws.bsr_mm_work_arrays(),
+            "GsHsi": ws.bsr_mm_work_arrays(),
             "Hlmbda": ws.bsr_mm_work_arrays(),
             "GxtHlmbda": ws.bsr_mm_work_arrays(),
             "GxtHlmbdaGx": ws.bsr_mm_work_arrays(),
         }
 
-        self._x = wp.array(self.model.particle_q, dtype=wp.vec3)
-        self._x_tilde = wp.empty_like(self._x)
+        self._particle_energies = wp.empty(self.model.particle_count, dtype=wp.float32)
+        self._tet_enegies = wp.empty(self.model.tet_count, dtype=wp.float32)
         self._s = wp.empty(self.model.tet_count, dtype=vec6)
-        self._lmbda = wp.zeros_like(self._s)
-
         log_columns = ["Sim Time", "Iteration"]
         self._log = None
 
@@ -84,7 +90,7 @@ class MFEMSolver(SolverBase):
         self._debug_logs = debug_logs
         self._log = pd.DataFrame(columns=log_columns)
         self._sim_time = 0.0
-
+        self._do_line_search = line_search
         # self._B = subspace
         #
 
@@ -97,9 +103,15 @@ class MFEMSolver(SolverBase):
             ),
             constraint_indices=wp.array(fix_indices, dtype=wp.int32),
             constraint_stiffness=wp.full(
-                shape=(fix_indices.shape[0],), value=1.0e-3, dtype=wp.float32
+                shape=(fix_indices.shape[0],), value=1.0, dtype=wp.float32
             ),
             n_particles=self.model.particle_count,
+        )
+
+        self._accumulator = TiledAccumulator(
+            max_length=max(3 * self.model.particle_count, 6 * self.model.tet_count),
+            device=self.model.device,
+            scalar_type=wp.float32,
         )
 
         self._initial_precompute()
@@ -115,12 +127,12 @@ class MFEMSolver(SolverBase):
 
     def _initial_precompute(self):
 
-        self.tet_rest_volumes = wp.empty(self.model.tet_count)
+        self._tet_rest_volumes = wp.empty(self.model.tet_count)
         wp.launch(
             precompute_rest_volumes,
             dim=self.model.tet_count,
             inputs=[self.model.tet_poses],
-            outputs=[self.tet_rest_volumes],
+            outputs=[self._tet_rest_volumes],
             device=self.model.device,
         )
 
@@ -217,7 +229,7 @@ class MFEMSolver(SolverBase):
     def _elastic_gradient_ds(
         self, state: State, s: wp.array[vec6], dt: float
     ) -> wp.array:
-        volume = self.tet_rest_volumes
+        volume = self._tet_rest_volumes
         materials = self.model.tet_materials
 
         return dt * dt * self._material_model.gradient_ds(s, materials, volume)
@@ -243,11 +255,20 @@ class MFEMSolver(SolverBase):
         return self.model.mass_matrix
 
     # TODO: fix block dimensions
-    def _constraint_gradient_ds_inverse(self, state: State, dt: float) -> ws.BsrMatrix:
-        return ws.bsr_diag(
-            wp.diag(vec6(1.0, 1.0, 1.0, 0.5, 0.5, 0.5)),
-            self.model.tet_count,
-            block_type=mat66,
+    def _constraint_gradient_ds_inverse(
+        self, state: State, dt: float
+    ) -> tuple[ws.BsrMatrix, ws.BsrMatrix]:
+        return (
+            ws.bsr_diag(
+                wp.diag(vec6(1.0, 1.0, 1.0, 2.0, 2.0, 2.0)),
+                self.model.tet_count,
+                block_type=mat66,
+            ),
+            ws.bsr_diag(
+                wp.diag(vec6(1.0, 1.0, 1.0, 0.5, 0.5, 0.5)),
+                self.model.tet_count,
+                block_type=mat66,
+            ),
         )
 
     def _constraint_gradient_dx(self, state: State, dt: float) -> ws.BsrMatrix:
@@ -274,17 +295,15 @@ class MFEMSolver(SolverBase):
 
     def _elastic_hessian_ds(
         self, state: State, s: wp.array[vec6], dt: float
-    ) -> wp.array:
+    ) -> tuple[ws.BsrMatrix, ws.BsrMatrix]:
 
-        return (
-            dt
-            * dt
-            * self._material_model.hessian_ds(
-                stretch=s,
-                material=self.model.tet_materials,
-                volume=self.tet_rest_volumes,
-            )
+        H_s, H_si = self._material_model.hessian_ds(
+            stretch=s,
+            material=self.model.tet_materials,
+            volume=self._tet_rest_volumes,
         )
+
+        return (dt * dt * H_s, H_si / (dt * dt))
 
     def _gradient_blocks(
         self,
@@ -312,58 +331,111 @@ class MFEMSolver(SolverBase):
         s: wp.array[vec6],
         x_tilde: wp.array[wp.vec3],
         dt: float,
-    ) -> tuple[ws.BsrMatrix, ws.BsrMatrix, ws.BsrMatrix, ws.BsrMatrix]:
+    ) -> tuple[ws.BsrMatrix, ws.BsrMatrix, ws.BsrMatrix, ws.BsrMatrix, ws.BsrMatrix]:
         kinetic_hessian = self._kinetic_hessian_dx(state, dt)
         boundary_condition_hessian = self._boundary_condition.hessian()
-        elastic_hessian = self._elastic_hessian_ds(state, s, dt)
-        constraint_gradient_ds_inverse = self._constraint_gradient_ds_inverse(state, dt)
+        elastic_hessian, inv_elastic_hessian = self._elastic_hessian_ds(state, s, dt)
+        constraint_gradient_ds, constraint_gradient_ds_inverse = (
+            self._constraint_gradient_ds_inverse(state, dt)
+        )
         constraint_gradient_dx = self._constraint_gradient_dx(state, dt)
 
         return (
             kinetic_hessian + boundary_condition_hessian,
             elastic_hessian,
+            inv_elastic_hessian,
+            constraint_gradient_ds,
             constraint_gradient_ds_inverse,
             constraint_gradient_dx,
         )
 
-    def _energy(
+    def _objective(
         self,
-        state: State,
         x: wp.array[wp.vec3],
         s: wp.array[vec6],
         lmbda: wp.array[vec6],
         x_tilde: wp.array[wp.vec3],
         dt: float,
-    ) -> float:
+        objective: wp.array[wp.float32],
+    ) -> wp.array:
         """For testing purposes won't work in a Cuda Graph"""
+        nodal_kinetic_objective = self._particle_energies
+        wp.launch(
+            kinetic_objective_kernel,
+            dim=self.model.particle_count,
+            inputs=[x, x_tilde, self.model.particle_mass],
+            outputs=[nodal_kinetic_objective],
+        )
+
+        self._accumulator.compute_sum(nodal_kinetic_objective)
+        wp.copy(objective, self._accumulator.result())
 
         # 0.5 * ||x- x' ||_M^2 = 0.5 * || = 0.5 * ||v * dt||_M^2
-        kinetic_energy = 0.5 * np.dot(
-            (x - x_tilde).numpy().flatten(),
-            ws.bsr_mv(self.model.mass_matrix, x - x_tilde).numpy().flatten(),
+        tet_energy = self._tet_enegies
+        self._material_model.energy(
+            s,
+            self.model.tet_materials,
+            self._tet_rest_volumes,
+            tet_energy,
         )
-        elastic_energy = (
-            dt
-            * dt
-            * (
-                self._material_model.energy(
-                    s, self.model.tet_materials, self.tet_rest_volumes
-                )
-                .numpy()
-                .sum()
-            )
+
+        wp.launch(
+            constraint_objective_kernel,
+            dim=self.model.tet_count,
+            inputs=[x, s, self.model.tet_indices, self.model.tet_poses, lmbda],
+            outputs=[tet_energy],
         )
-        constraints = self._constraints(state, x, s).numpy().reshape((-1, 6, 1))
-        lagrange_multipliers = lmbda.numpy().reshape((-1, 6, 1)).transpose((0, 2, 1))
-        diag = np.diag([1.0, 1.0, 1.0, 2.0, 2.0, 2.0])
-        constraint_energy = (
-            -lagrange_multipliers * diag[np.newaxis, :, :] * constraints
-        ).sum()
 
-        return kinetic_energy, elastic_energy, constraint_energy
+        self._accumulator.compute_sum(tet_energy)
+        linear_accumulate(objective, self._accumulator.result(), beta=(dt * dt))
 
-    def _line_search(self, dx, ds, lmbda) -> float:
-        return 1.0
+        self._boundary_condition.energy(x, self._accumulator)
+        linear_accumulate(objective, self._accumulator.result(), beta=(dt * dt))
+
+        return objective
+
+    # I should probably refactor all of this
+    def _line_search(
+        self,
+        x: wp.array[wp.vec3],
+        s: wp.array[vec6],
+        lmbda: wp.array[vec6],
+        G_xt: ws.BsrMatrix,
+        G_st: ws.BsrMatrix,
+        g_x: wp.array[wp.vec3],
+        g_s: wp.array[vec6],
+        x_tilde: wp.array[wp.vec3],
+        dx: wp.array[wp.vec3],
+        ds: wp.array[vec6],
+        dt: wp.float32,
+        max_iterations=10,
+        alpha0=3.0,
+        tau=0.333,
+        c=0.7,
+        threshold=1e-4,
+    ):
+
+        def objective_fn(dof_arrays: tuple[wp.array], objective: wp.array[wp.float32]):
+            self._objective(dof_arrays[0], dof_arrays[1], lmbda, x_tilde, dt, objective)
+
+        dof_arrays = (x, s)
+        search_direction = (dx, ds)
+        gradient = (
+            g_x + G_xt @ lmbda,
+            g_s + G_st @ lmbda,
+        )
+        return backtracking_line_search(
+            objective_fn,
+            dof_arrays,
+            search_direction,
+            gradient,
+            self._accumulator,
+            max_iterations,
+            alpha0,
+            tau,
+            c,
+            threshold,
+        )
 
     def _solver_iteration(
         self,
@@ -375,18 +447,20 @@ class MFEMSolver(SolverBase):
         dt: float,
         reuse_topology: bool = True,
         timer: bool = False,
-    ) -> tuple[wp.array[wp.vec3], wp.array[vec6], wp.array[vec6]]:
+    ) -> tuple[wp.array[wp.float32]] | None:
         # log = {}
         (
             H_x,  # Kinetic Hessian
             H_s,  # Elastic Hessian
+            H_si,
+            G_s,
             G_si,  # Inverse constraint gradient with respect to stretch
             G_x,  # Constraint gradient with respect to position
         ) = self._hessian_blocks(state_in, x, s, x_tilde, dt)
         (
             g_x,  # Kinetic gradient
-            g_s,  # Constraint gradient with respect to stretch
-            constraint,  # Constraint values
+            g_s,  # Elastic gradient with respect to stretch
+            g_lmbda,  # Constraint values (i.e. gradient with respecto to lagrange multipliers)
         ) = self._gradient_blocks(state_in, x, s, x_tilde, dt)
 
         # if self._debug_logs:
@@ -408,9 +482,14 @@ class MFEMSolver(SolverBase):
             )
             # plot_bsr(H_lmbda)
 
-            invert_diagonal_bsr(HsGsi)
+            GsHsi = ws.bsr_mm(
+                G_s,
+                H_si,
+                reuse_topology=reuse_topology,
+                work_arrays=self._bsr_work_arrays["GsHsi"],
+            )
 
-            g_lmbda = constraint + HsGsi @ g_s
+            g_lmbda = g_lmbda + GsHsi @ g_s
             # if self._debug_logs:
             #     log.update({"g_lmbda": g_lmbda.numpy().flatten()})
 
@@ -451,10 +530,8 @@ class MFEMSolver(SolverBase):
             # print(self._lhs)
 
         with wp.ScopedTimer("Local solve", active=timer):
-            Hsi = invert_diagonal_bsr(H_s)
-            G_s = invert_diagonal_bsr(G_si)
             lmbda = -H_lmbda @ (g_lmbda - G_x @ dx)
-            ds = -Hsi @ (G_s @ lmbda + g_s)
+            ds = -H_si @ (G_s @ lmbda + g_s)
 
         # if self._debug_logs:
         #     log.update(
@@ -466,10 +543,24 @@ class MFEMSolver(SolverBase):
         #     )
 
         # self.apply_updates(x, s, lmbda, dx, ds)
-        alpha = self._line_search(dx, ds, lmbda)
-        x += alpha * dx
-        s += alpha * ds
-        return x, s, lmbda
+        if self._do_line_search:
+            return self._line_search(
+                x,
+                s,
+                lmbda,
+                G_xt,
+                G_s,
+                g_x,
+                g_s,
+                x_tilde,
+                dx,
+                ds,
+                dt,
+                max_iterations=1000,
+            )
+        else:
+            x += dx
+            s += ds
 
     # def apply_updates(self, x, s, lmbda, dx, ds):
     #     alpha = self._line_search(dx, ds, lmbda)
@@ -526,7 +617,8 @@ class MFEMSolver(SolverBase):
         #     + state_in.particle_qd * dt
         #     + 0.5 * state_in.particle_f * self.model.particle_inv_mass * dt * dt
         # )
-
+        #
+        energy_log = []
         for i in range(self.solver_iterations):
             # log_row = {
             #     "Sim Time": self._sim_time,
@@ -549,12 +641,20 @@ class MFEMSolver(SolverBase):
             #         }
             #     )
 
-            with wp.ScopedTimer("Iteration " + str(i)):
+            with wp.ScopedTimer("Iteration " + str(i), active=True):
                 # x, s, lmbda =
-                self._solver_iteration(state_in, x, s, lmbda, x_tilde, dt, timer=True)
+                objective = self._solver_iteration(
+                    state_in, x, s, lmbda, x_tilde, dt, timer=False
+                )
+                # energy_log.append(objective.numpy()[1])
 
             # log_row.update(iteration_log)
             # self._log.loc[len(self._log)] = log_row
+
+        # plt.plot(energy_log)
+        # plt.xlabel("Iteration")
+        # plt.ylabel("Energy")
+        # plt.show()
 
         wp.copy(
             state_out.particle_qd,

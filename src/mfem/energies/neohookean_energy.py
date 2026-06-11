@@ -1,9 +1,18 @@
 import warp as wp
 import warp.sparse as ws
 
+from ..numerical import psd_fix_6
+from ..types import mat66, vec6
+from ..utils import (
+    det_sym_vec6,
+    frob2_sym_vec6,
+    grad_det_sym_vec6,
+    hess_det_sym_vec6,
+    tr_sym_vec6,
+)
 from .material_model import StretchMaterialModel
-from .types import mat66, vec6
-from .utils import frob2_sym_vec6, tr_sym_vec6
+
+MIN_J = 0.0
 
 
 @wp.kernel
@@ -16,11 +25,12 @@ def energy_kernel(
     tid = wp.tid()
     mu = tet_materials[tid, 0]
     lmbda = tet_materials[tid, 1]
-    energy[tid] = (
-        volume[tid]
-        * mu
-        / 2.0
-        * (frob2_sym_vec6(stretch[tid]) + 3.0 - 2.0 * tr_sym_vec6(stretch[tid]))
+
+    frob = frob2_sym_vec6(stretch[tid])
+    logJ = wp.log(wp.max(det_sym_vec6(stretch[tid]), 0.1))
+
+    energy[tid] = volume[tid] * (
+        (mu / 2.0 * (frob * frob - 3.0)) - mu * logJ + lmbda / 2.0 * logJ * logJ
     )
 
 
@@ -35,14 +45,13 @@ def gradient_ds_kernel(
     mu = tet_materials[tid, 0]
     lmbda = tet_materials[tid, 1]
 
+    Sym = wp.diag(vec6(1.0, 1.0, 1.0, 2.0, 2.0, 2.0))
+    J = wp.max(det_sym_vec6(stretch[tid]), 0.1)
+    gradJds = grad_det_sym_vec6(stretch[tid])
+
     # dPhi/ds = mu * volume * (S - I)
-    gradient_ds[tid] = (
-        mu
-        * volume[tid]
-        * (
-            wp.diag(vec6(1.0, 1.0, 1.0, 2.0, 2.0, 2.0)) * stretch[tid]
-            - vec6(1.0, 1.0, 1.0, 0.0, 0.0, 0.0)
-        )
+    gradient_ds[tid] = volume[tid] * (
+        mu * (Sym * stretch[tid] - 1.0 / J * gradJds) + lmbda * wp.log(J) / J * gradJds
     )
 
 
@@ -52,29 +61,43 @@ def hessian_ds_kernel(
     tet_materials: wp.array2d[wp.float32],
     volume: wp.array[wp.float32],
     hessian_ds: wp.array[mat66],
+    hessian_dsi: wp.array[mat66],
 ):
     tid = wp.tid()
     mu = tet_materials[tid, 0]
     lmbda = tet_materials[tid, 1]
 
-    hessian_ds[tid] = mu * volume[tid] * wp.diag(vec6(1.0, 1.0, 1.0, 2.0, 2.0, 2.0))
+    Sym = wp.diag(vec6(1.0, 1.0, 1.0, 2.0, 2.0, 2.0))
+    J = wp.max(det_sym_vec6(stretch[tid]), 0.1)
+    logJ = wp.log(J)
+    gradJds = grad_det_sym_vec6(stretch[tid])
+    hessJds = hess_det_sym_vec6(stretch[tid])
+
+    hess = volume[tid] * (
+        mu * Sym
+        + (mu * 1.0 / J + lmbda * (1.0 + logJ) / (J * J)) * wp.outer(gradJds, gradJds)
+        + (-mu * 1.0 / J + lmbda * logJ / J) * hessJds
+    )
+
+    fix = psd_fix_6(hess)
+    hessian_ds[tid] = fix.mat
+    hessian_dsi[tid] = fix.inv
 
 
-class ARAPEnergy(StretchMaterialModel):
+class NeoHookeanEnergy(StretchMaterialModel):
     @staticmethod
     def energy(
         stretch: wp.array[vec6],
         tet_materials: wp.array2d[wp.float32],
         volume: wp.array[wp.float32],
+        energy: wp.array[wp.float32],
     ):
-        energy = wp.empty(shape=(stretch.shape[0],), dtype=wp.float32)
         wp.launch(
             energy_kernel,
             dim=stretch.shape[0],
             inputs=[stretch, tet_materials, volume],
             outputs=[energy],
         )
-        return energy
 
     @staticmethod
     def gradient_ds(
@@ -99,11 +122,13 @@ class ARAPEnergy(StretchMaterialModel):
     ):
         # d^2Phi/ds^2 = mu * volume * (S - I)
         diagonal_blocks = wp.empty(shape=(stretch.shape[0],), dtype=mat66)
+        inverse_diagonal_blocks = wp.empty(shape=(stretch.shape[0],), dtype=mat66)
         wp.launch(
             hessian_ds_kernel,
             dim=stretch.shape[0],
             inputs=[stretch, material, volume],
-            outputs=[diagonal_blocks],
+            outputs=[diagonal_blocks, inverse_diagonal_blocks],
         )
         H_s = ws.bsr_diag(diagonal_blocks, block_type=mat66)
-        return H_s
+        H_si = ws.bsr_diag(inverse_diagonal_blocks, block_type=mat66)
+        return H_s, H_si

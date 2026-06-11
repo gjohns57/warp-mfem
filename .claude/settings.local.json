@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(uv run *)",
+      "Bash(2>&1)",
+      "Bash(python -c ' *)",
+      "Bash(pip show *)",
+      "Bash(python -m pytest tests/test_kernels.py::test_constraint_gradient_dx tests/test_functions.py::test_stretch_gradient -v)",
+      "Bash(python3 -c \"import warp\")",
+      "Read(//home/gabriel/.local/**)",
+      "Read(//home/gabriel/anaconda3/**)",
+      "Read(//home/gabriel/miniconda3/**)",
+      "Bash(find /home/gabriel -name \"warp\" -type d 2>/dev/null | head -10; find /opt -name \"warp\" -type d 2>/dev/null | head -5)",
+      "Bash(.venv/bin/python -m pytest tests/test_kernels.py::test_constraint_gradient_dx tests/test_functions.py::test_stretch_gradient -v)",
+      "Bash(.venv/bin/python -m pytest tests/test_kernels.py::test_constraint_gradient_dx -vv)"
+    ]
+  }
+}

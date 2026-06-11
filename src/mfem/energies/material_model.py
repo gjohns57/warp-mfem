@@ -1,6 +1,7 @@
 import warp as wp
+import warp.sparse
 
-from .utils import vec6
+from ..types import vec6
 
 
 class StretchMaterialModel:
@@ -9,6 +10,7 @@ class StretchMaterialModel:
         stretch: wp.array[vec6],
         material: wp.array2d[wp.float32],
         volume: wp.array[wp.float32],
+        energy: wp.array[wp.float32],
     ):
         raise NotImplementedError()
 
@@ -17,7 +19,7 @@ class StretchMaterialModel:
         stretch: wp.array[vec6],
         material: wp.array2d[wp.float32],
         volume: wp.array[wp.float32],
-    ):
+    ) -> wp.array:
         raise NotImplementedError()
 
     @staticmethod
@@ -25,5 +27,5 @@ class StretchMaterialModel:
         stretch: wp.array[vec6],
         material: wp.array2d[wp.float32],
         volume: wp.array[wp.float32],
-    ):
+    ) -> tuple[warp.sparse.BsrMatrix, warp.sparse.BsrMatrix]:
         raise NotImplementedError()

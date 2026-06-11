@@ -112,7 +112,6 @@ def evaluate_constraints(
     # print(F[1, :])
     # print(F[2, :])
 
-
     stretch_grad = sym_mat33_to_vec6(stretch_component(F))
     # print("stretch:")
     # print(stretch_grad)
@@ -173,6 +172,41 @@ def project_position(
     tid = wp.tid()
     g = gravity[0]  # Use world 0 gravity whatever that means
 
+    x_tilde[tid] = (
+        particle_q[tid] + particle_qd[tid] * dt + 0.5 * (particle_f[tid] + g) * dt * dt
+    )
 
-    x_tilde[tid] = (particle_q[tid] + particle_qd[tid] * dt + 0.5 * (particle_f[tid] + g) * dt * dt)
 
+@wp.kernel
+def kinetic_objective_kernel(
+    particle_q: wp.array[wp.vec3],
+    x_tilde: wp.array[wp.vec3],
+    mass: wp.array[wp.float32],
+    objective: wp.array[wp.float32],
+):
+    tid = wp.tid()
+
+    x = particle_q[tid]
+    y = x_tilde[tid]
+    m = mass[tid]
+    objective[tid] = wp.dot(x - y, x - y) * m
+
+
+@wp.kernel
+def constraint_objective_kernel(
+    particle_q: wp.array[wp.vec3],
+    stretch: wp.array[vec6],
+    tets: wp.array2d[wp.int32],
+    rest: wp.array[wp.mat33],
+    lmbda: wp.array[vec6],
+    objective: wp.array[wp.float32],
+):
+
+    tid = wp.tid()
+    s = stretch[tid]
+
+    F = deformation_gradient(particle_q, tets, rest, tid)
+    stretch_grad = sym_mat33_to_vec6(stretch_component(F))
+    objective[tid] += wp.dot(
+        wp.diag(vec6(1.0, 1.0, 1.0, 2.0, 2.0, 2.0)) * (stretch_grad - s), lmbda[tid]
+    )
