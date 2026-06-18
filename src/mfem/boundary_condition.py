@@ -40,21 +40,22 @@ class DirichletBoundaryCondition:
         Q = SGamma @ S.transpose()
 
         self._SGamma = SGamma
-        self._pin_positions = wp.clone(pin_positions)
+        self._pin_positions = pin_positions
         self._Q = Q
         self._b = b
         self._S = S
+        self._Gamma = Gamma
 
-        # self._c = wp.array(
-        #     [
-        #         0.5
-        #         * np.dot(
-        #             pin_positions.numpy().flatten(),
-        #             (Gamma @ pin_positions).numpy().flatten(),
-        #         )
-        #     ],
-        #     dtype=wp.float32,
-        # )
+        self._c = wp.array(
+            [
+                0.5
+                * np.dot(
+                    pin_positions.numpy().flatten(),
+                    (Gamma @ pin_positions).numpy().flatten(),
+                )
+            ],
+            dtype=wp.float32,
+        )
 
     def energy(self, x: wp.array[wp.vec3], accumulator: TiledAccumulator):
         wp.copy(self._work_arrays["Qx_b"], self._b)
@@ -62,9 +63,10 @@ class DirichletBoundaryCondition:
         # print(self._work_arrays["Qx_b"])
         # y = 0.5 * self._Q @ x + self._b
 
-        accumulator.compute_dot(
-            x.view(wp.float32).flatten(), y.view(wp.float32).flatten()
-        )
+        accumulator.compute_dot(x, y)
+
+        res = accumulator.result()
+        res += self._c
 
     def gradient(
         self, x: wp.array[wp.vec3], grad: wp.array[wp.vec3] | None = None
@@ -77,3 +79,12 @@ class DirichletBoundaryCondition:
 
     def hessian(self):
         return self._Q
+
+    def update_b(self, accumulator: TiledAccumulator | None = None):
+        self._b = ws.bsr_mv(-self._SGamma, self._pin_positions, self._b)
+
+        if accumulator is not None:
+            accumulator.compute_dot(
+                self._pin_positions, self._Gamma @ self._pin_positions
+            )
+            wp.copy(self._c, 0.5 * accumulator.result())

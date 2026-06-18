@@ -8,8 +8,11 @@ from ..utils import (
     frob2_sym_vec6,
     grad_det_sym_vec6,
     hess_det_sym_vec6,
+    tr_sym_vec6,
 )
 from .material_model import StretchMaterialModel
+
+MIN_J = 0.0
 
 
 @wp.kernel
@@ -23,11 +26,11 @@ def energy_kernel(
     mu = tet_materials[tid, 0]
     lmbda = tet_materials[tid, 1]
 
-    I2 = frob2_sym_vec6(stretch[tid])
-    I3 = det_sym_vec6(stretch[tid])
+    frob = frob2_sym_vec6(stretch[tid])
+    logJ = wp.log(det_sym_vec6(stretch[tid]))
 
     energy[tid] = volume[tid] * (
-        mu * (I2 - 3.0) / 2.0 - mu * (I3 - 1.0) + lmbda / 2.0 * (I3 - 1.0) * (I3 - 1.0)
+        (mu / 2.0 * (frob - 3.0)) - mu * logJ + lmbda / 2.0 * logJ * logJ
     )
 
 
@@ -43,12 +46,12 @@ def gradient_ds_kernel(
     lmbda = tet_materials[tid, 1]
 
     Sym = wp.diag(vec6(1.0, 1.0, 1.0, 2.0, 2.0, 2.0))
-    J = det_sym_vec6(stretch[tid])
+    J = wp.max(det_sym_vec6(stretch[tid]), 0.1)
     gradJds = grad_det_sym_vec6(stretch[tid])
 
     # dPhi/ds = mu * volume * (S - I)
     gradient_ds[tid] = volume[tid] * (
-        mu * Sym * stretch[tid] + (lmbda * (J - 1.0) - mu) * gradJds
+        mu * Sym * stretch[tid] + (lmbda * wp.log(J) - mu) / J * gradJds
     )
 
 
@@ -65,14 +68,15 @@ def hessian_ds_kernel(
     lmbda = tet_materials[tid, 1]
 
     Sym = wp.diag(vec6(1.0, 1.0, 1.0, 2.0, 2.0, 2.0))
-    J = det_sym_vec6(stretch[tid])
+    J = wp.max(det_sym_vec6(stretch[tid]), 0.1)
+    logJ = wp.log(J)
     gradJds = grad_det_sym_vec6(stretch[tid])
     hessJds = hess_det_sym_vec6(stretch[tid])
 
     hess = volume[tid] * (
         mu * Sym
-        + lmbda * wp.outer(gradJds, gradJds)
-        + (lmbda * (J - 1.0) - mu) * hessJds
+        + (lmbda * (1.0 - logJ) + mu) / (J * J) * wp.outer(gradJds, gradJds)
+        + (lmbda * logJ - mu) / J * hessJds
     )
 
     fix = psd_fix_6(hess)
@@ -80,7 +84,7 @@ def hessian_ds_kernel(
     hessian_dsi[tid] = fix.inv
 
 
-class NeoHookeanEnergy(StretchMaterialModel):
+class StableNeohookeanEnergy(StretchMaterialModel):
     @staticmethod
     def energy(
         stretch: wp.array[vec6],

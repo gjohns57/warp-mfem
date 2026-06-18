@@ -4,7 +4,7 @@ import numpy as np
 import warp as wp
 import warp.sparse as ws
 
-from .types import mat66, mat69, mat99, mat912, vec6, vec9
+from .types import float_type, mat33, mat66, mat69, mat99, mat912, vec3, vec6, vec9
 
 """
 Utilities for MFEM elastic energy functions:
@@ -21,7 +21,7 @@ SUM_TILE_SIZE = 256
 
 
 @wp.func
-def flatten(mat: wp.mat33) -> vec9:
+def flatten(mat: mat33) -> vec9:
     c0 = mat[:, 0]
     c1 = mat[:, 1]
     c2 = mat[:, 2]
@@ -30,17 +30,17 @@ def flatten(mat: wp.mat33) -> vec9:
 
 
 @wp.func
-def unflatten(vec: vec9) -> wp.mat33:
+def unflatten(vec: vec9) -> mat33:
     return wp.matrix_from_cols(vec[0:3], vec[3:6], vec[6:9])
 
 
 @wp.func
-def unflatten_t(vec: vec9) -> wp.mat33:
+def unflatten_t(vec: vec9) -> mat33:
     return wp.matrix_from_rows(vec[0:3], vec[3:6], vec[6:9])
 
 
 @wp.func
-def row_flatten(mat: wp.mat33) -> vec9:
+def row_flatten(mat: mat33) -> vec9:
     r0 = mat.get_row(0)
     c1 = mat.get_row(1)
     c2 = mat.get_row(2)
@@ -49,12 +49,12 @@ def row_flatten(mat: wp.mat33) -> vec9:
 
 
 @wp.func
-def sym_mat33_to_vec6(mat: wp.mat33) -> vec6:
+def sym_mat33_to_vec6(mat: mat33) -> vec6:
     return vec6(mat[0, 0], mat[1, 1], mat[2, 2], mat[0, 1], mat[0, 2], mat[1, 2])
 
 
 @wp.func
-def frob2_sym_vec6(vec: vec6) -> wp.float32:
+def frob2_sym_vec6(vec: vec6) -> float_type:
     return (
         vec[0] * vec[0]
         + vec[1] * vec[1]
@@ -64,7 +64,7 @@ def frob2_sym_vec6(vec: vec6) -> wp.float32:
 
 
 @wp.func
-def det_sym_vec6(s: vec6) -> wp.float32:
+def det_sym_vec6(s: vec6) -> float_type:
     return (s[0] * s[1] * s[2] + 2.0 * s[3] * s[4] * s[5]) - (
         s[1] * s[4] * s[4] + s[0] * s[5] * s[5] + s[2] * s[3] * s[3]
     )
@@ -98,22 +98,22 @@ def hess_det_sym_vec6(s: vec6) -> mat66:
 
 
 @wp.func
-def frob_sym_vec6(vec: vec6) -> wp.float32:
+def frob_sym_vec6(vec: vec6) -> float_type:
     return wp.sqrt(frob2_sym_vec6(vec))
 
 
 @wp.func
-def tr_sym_vec6(vec: vec6) -> wp.float32:
+def tr_sym_vec6(vec: vec6) -> float_type:
     return vec[0] + vec[1] + vec[2]
 
 
 @wp.func
 def deformation_gradient(
-    position: wp.array[wp.vec3],
+    position: wp.array[vec3],
     indices: wp.array2d[wp.int32],
-    inv_rest_matrix: wp.array[wp.mat33],
+    inv_rest_matrix: wp.array[mat33],
     tid: int,
-) -> wp.mat33:
+) -> mat33:
     x0 = position[indices[tid, 0]]
     x1 = position[indices[tid, 1]]
     x2 = position[indices[tid, 2]]
@@ -125,7 +125,7 @@ def deformation_gradient(
 
 
 @wp.func
-def deformation_gradient_dF_dx(DmInv: wp.mat33) -> mat912:
+def deformation_gradient_dF_dx(DmInv: mat33) -> mat912:
     m = DmInv[0, 0]
     n = DmInv[0, 1]
     o = DmInv[0, 2]
@@ -182,7 +182,7 @@ def deformation_gradient_dF_dx(DmInv: wp.mat33) -> mat912:
 
 
 @wp.func
-def rotational_svd(A: wp.mat33):
+def rotational_svd(A: mat33):
     U = wp.mat33()
     sigma = wp.vec3()
     V = wp.mat33()
@@ -206,7 +206,7 @@ def rotational_svd(A: wp.mat33):
 
 
 @wp.func
-def stretch_component(A: wp.mat33):
+def stretch_component(A: mat33):
     U, sigma, V = rotational_svd(A)
     return V * wp.diag(sigma) * wp.transpose(V)
 
@@ -230,7 +230,7 @@ def stretch_component(A: wp.mat33):
 
 # Returns the gradient of s(F) the first index is the dependent variable s and the second index is the flattened independent variable F
 @wp.func
-def stretch_gradient(F: wp.mat33) -> mat69:
+def stretch_gradient(F: mat33) -> mat69:
     dR_dF, U, sigma, V = rotation_gradient(F)
     R = U * wp.transpose(V)
     grad = mat69()
@@ -248,7 +248,7 @@ def stretch_gradient(F: wp.mat33) -> mat69:
 
 
 @wp.func
-def rotation_gradient(F: wp.mat33) -> tuple[mat99, wp.mat33, wp.vec3, wp.mat33]:
+def rotation_gradient(F: mat33) -> tuple[mat99, mat33, vec3, mat33]:
     U, sigma, V = rotational_svd(F)
 
     T0 = wp.mat33(0.0, -1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0)
@@ -281,7 +281,7 @@ def rotation_gradient(F: wp.mat33) -> tuple[mat99, wp.mat33, wp.vec3, wp.mat33]:
 
 @wp.kernel
 def invert_diagonal_values(
-    values: wp.array3d[wp.float32],
+    values: wp.array3d[float_type],
     dim: int,
 ):
     tid = wp.tid()
@@ -347,8 +347,8 @@ def linear_accumulate(a: wp.array, b: wp.array, alpha: float = 1.0, beta: float 
 @wp.kernel
 def _linear_accumulate(
     b: wp.array[Any],
-    alpha: wp.float32,
-    beta: wp.float32,
+    alpha: float_type,
+    beta: float_type,
     a: wp.array[Any],
 ):
     tid = wp.tid()

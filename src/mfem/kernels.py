@@ -1,6 +1,6 @@
 import warp as wp
 
-from .types import mat63, vec6
+from .types import float_type, mat33, mat63, vec3, vec6
 from .utils import (
     deformation_gradient,
     deformation_gradient_dF_dx,
@@ -12,9 +12,9 @@ from .utils import (
 
 @wp.kernel
 def precompute_tet_stretch(
-    particle_q: wp.array[wp.vec3],
+    particle_q: wp.array[vec3],
     tets: wp.array2d[wp.int32],
-    rest: wp.array[wp.mat33],
+    rest: wp.array[mat33],
     tet_stretch: wp.array[vec6],
 ):
     tid = wp.tid()
@@ -27,8 +27,8 @@ def precompute_tet_stretch(
 
 @wp.kernel
 def precompute_rest_volumes(
-    rest: wp.array[wp.mat33],
-    volume: wp.array[wp.float32],
+    rest: wp.array[mat33],
+    volume: wp.array[float_type],
 ):
     tid = wp.tid()
 
@@ -38,10 +38,10 @@ def precompute_rest_volumes(
 
 @wp.kernel
 def precompute_mass_matrix(
-    particle_q: wp.array[wp.vec3],
+    particle_q: wp.array[vec3],
     tets: wp.array2d[wp.int32],
-    density: wp.array[wp.float32],
-    mass: wp.array[wp.mat33],
+    density: wp.array[float_type],
+    mass: wp.array[mat33],
 ):
     tid = wp.tid()
 
@@ -56,22 +56,22 @@ def precompute_mass_matrix(
     wp.atomic_add(
         mass,
         tets[tid, 0],
-        wp.identity(3, dtype=wp.float32) * density[tets[tid, 0]] * volume / 4.0,
+        wp.identity(3, dtype=float_type) * density[tets[tid, 0]] * volume / 4.0,
     )
     wp.atomic_add(
         mass,
         tets[tid, 1],
-        wp.identity(3, dtype=wp.float32) * density[tets[tid, 1]] * volume / 4.0,
+        wp.identity(3, dtype=float_type) * density[tets[tid, 1]] * volume / 4.0,
     )
     wp.atomic_add(
         mass,
         tets[tid, 2],
-        wp.identity(3, dtype=wp.float32) * density[tets[tid, 2]] * volume / 4.0,
+        wp.identity(3, dtype=float_type) * density[tets[tid, 2]] * volume / 4.0,
     )
     wp.atomic_add(
         mass,
         tets[tid, 3],
-        wp.identity(3, dtype=wp.float32) * density[tets[tid, 3]] * volume / 4.0,
+        wp.identity(3, dtype=float_type) * density[tets[tid, 3]] * volume / 4.0,
     )
 
 
@@ -96,10 +96,10 @@ def precompute_bsr_topology(
 
 @wp.kernel
 def evaluate_constraints(
-    particle_q: wp.array[wp.vec3],
+    particle_q: wp.array[vec3],
     stretch: wp.array[vec6],
     tets: wp.array2d[wp.int32],
-    rest: wp.array[wp.mat33],
+    rest: wp.array[mat33],
     constraint: wp.array[vec6],
 ):
 
@@ -123,8 +123,8 @@ def evaluate_constraints(
 
 # @wp.kernel
 # def evaluate_kinetic_gradient_dx(
-#     particle_qd: wp.array[wp.vec3],
-#     kinetic_gradient_dx: wp.array[wp.vec3],
+#     particle_qd: wp.array[vec3],
+#     kinetic_gradient_dx: wp.array[vec3],
 #     dt: float,
 # ):
 #     tid = wp.tid()
@@ -133,9 +133,9 @@ def evaluate_constraints(
 
 @wp.kernel
 def evaluate_constraint_gradient_dx(
-    particle_q: wp.array[wp.vec3],
+    particle_q: wp.array[vec3],
     tets: wp.array2d[wp.int32],
-    rest: wp.array[wp.mat33],
+    rest: wp.array[mat33],
     values: wp.array[mat63],
 ):
     tid = wp.tid()
@@ -153,20 +153,20 @@ def evaluate_constraint_gradient_dx(
 
 
 @wp.kernel
-def test_deform_kernel(x: wp.array[wp.vec3]):
+def test_deform_kernel(x: wp.array[vec3]):
     tid = wp.tid()
-    shear = wp.mat33(1.0, 0.0, 0.0, 0.0, 1.0, 2.0, 0.0, 0.0, 1.0)
+    shear = mat33(1.0, 0.0, 0.0, 0.0, 1.0, 2.0, 0.0, 0.0, 1.0)
 
     x[tid] = shear * x[tid]
 
 
 @wp.kernel
 def project_position(
-    particle_q: wp.array[wp.vec3],
-    particle_qd: wp.array[wp.vec3],
-    gravity: wp.array[wp.vec3],
-    particle_f: wp.array[wp.vec3],
-    x_tilde: wp.array[wp.vec3],
+    particle_q: wp.array[vec3],
+    particle_qd: wp.array[vec3],
+    gravity: wp.array[vec3],
+    particle_f: wp.array[vec3],
+    x_tilde: wp.array[vec3],
     dt: float,
 ):
     tid = wp.tid()
@@ -179,10 +179,10 @@ def project_position(
 
 @wp.kernel
 def kinetic_objective_kernel(
-    particle_q: wp.array[wp.vec3],
-    x_tilde: wp.array[wp.vec3],
-    mass: wp.array[wp.float32],
-    objective: wp.array[wp.float32],
+    particle_q: wp.array[vec3],
+    x_tilde: wp.array[vec3],
+    mass: wp.array[float_type],
+    objective: wp.array[float_type],
 ):
     tid = wp.tid()
 
@@ -194,12 +194,12 @@ def kinetic_objective_kernel(
 
 @wp.kernel
 def constraint_objective_kernel(
-    particle_q: wp.array[wp.vec3],
+    particle_q: wp.array[vec3],
     stretch: wp.array[vec6],
     tets: wp.array2d[wp.int32],
-    rest: wp.array[wp.mat33],
+    rest: wp.array[mat33],
     lmbda: wp.array[vec6],
-    objective: wp.array[wp.float32],
+    objective: wp.array[float_type],
 ):
 
     tid = wp.tid()

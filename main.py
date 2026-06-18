@@ -1,21 +1,15 @@
-import warp as wp
+import matplotlib.pyplot as plt
+from newton.examples import init, run
 
-
-def main():
-    x = 10.0
-    msg = "hello"
-
-    def inner_func():
-        nonlocal x
-        x -= 1.0
-        print(msg)
-
-    #
-    # inner_function = lambda _: x -= 1.0
-
-    while x >= 0.0:
-        inner_func()
-
+from mfem import MFEMExample
 
 if __name__ == "__main__":
-    main()
+    parser = MFEMExample.create_parser()
+    # with wp.ScopedDevice("cuda:0"):
+    viewer, args = init(parser)
+    example = MFEMExample(viewer, args)
+    fig = plt.figure()
+    run(example, args)
+
+    plt.title("Energy per iteration")
+    plt.savefig("energy.png")
