@@ -1,4 +1,6 @@
 import matplotlib.pyplot as plt
+import newton
+import warp as wp
 from newton.examples import init, run
 
 from mfem import MFEMExample

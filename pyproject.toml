@@ -13,13 +13,16 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "imgui-bundle>=1.92.801",
+    "libigl>=2.6.2",
     "matplotlib>=3.10.9",
     "newton>=1.1.0",
     "nvtx>=0.2.15",
     "pandas>=3.0.3",
     "pillow>=12.2.0",
+    "polyscope>=2.6.1",
     "pyarrow>=24.0.0",
     "pyglet>=2.1.14",
+    "rerun-sdk>=0.33.1",
     "usd-core>=26.5",
     "viser>=1.0.30",
     "warp-lang>=1.12.1",
@@ -32,22 +35,10 @@ dependencies = [
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 
-[tool.uv.workspace]
-members = [
-    "simkit",
-]
-
-[tool.uv.sources]
-simkit = { workspace = true }
-# Optional: force a specific import mode
-#addopts = ["--import-mode=importlib"]
-
-
 [dependency-groups]
 dev = [
     "ipykernel>=7.3.0",
     "libigl>=2.6.2",
-    "polyscope>=2.5.0",
     "pytest>=9.0.3",
     "scipy>=1.17.1",
     "torch>=2.12.0",

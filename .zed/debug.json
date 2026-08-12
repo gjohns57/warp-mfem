@@ -1,0 +1,24 @@
+// Project-local debug tasks
+//
+// For more documentation on how to configure debug tasks,
+// see: https://zed.dev/docs/debugger
+[
+  {
+    "adapter": "Debugpy",
+    "label": "run '…ement/solver.py'",
+    "request": "launch",
+    "python": "$ZED_CUSTOM_PYTHON_ACTIVE_ZED_TOOLCHAIN",
+    "args": [],
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "program": "\"$ZED_FILE\""
+  },
+  {
+    "adapter": "Debugpy",
+    "label": "run '/home/gabriel/auras/warp-mfem/src/mfem/refinement/sim.py'",
+    "request": "launch",
+    "python": "$ZED_CUSTOM_PYTHON_ACTIVE_ZED_TOOLCHAIN",
+    "args": [],
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "program": "\"$ZED_FILE\""
+  }
+]

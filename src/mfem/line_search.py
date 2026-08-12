@@ -42,7 +42,7 @@ def _condition_kernel(
     cond_and_iteration: wp.array[wp.int32],
 ):
     cond_and_iteration[0] = wp.where(
-        (objective[0] - objective[1]) + threshold < alpha_and_t[0] * alpha_and_t[1]
+        (objective[0] - objective[1]) + threshold < (alpha_and_t[0] * (alpha_and_t[1]))
         and cond_and_iteration[1] < max_iter,
         1,
         0,
@@ -115,8 +115,8 @@ def backtracking_line_search(
         )
         linear_accumulate(alpha_and_t[1:2], accumulator.result(), beta=-c)
 
-        accumulator.compute_dot(search_direction[i], hessians[i] @ search_direction[i])
-        linear_accumulate(alpha_and_t[1:2], accumulator.result(), beta=-0.5 * c)
+        # accumulator.compute_dot(search_direction[i], hessians[i] @ search_direction[i])
+        # linear_accumulate(alpha_and_t[2:3], accumulator.result(), beta=-0.5 * c)
 
     def backtracking_loop():
         for i in range(len(dof_arrays)):
@@ -155,10 +155,10 @@ def backtracking_line_search(
         for i in range(len(dof_arrays)):
             wp.copy(dof_arrays[i], new_dof[i])
 
-    write_update()
-    # wp.capture_if(
-    #     cond_and_iteration[0:1],
-    #     on_true=write_udpate,
-    # )
+    # write_update()
+    wp.capture_if(
+        cond_and_iteration[0:1],
+        on_true=write_update,
+    )
 
     return objective
