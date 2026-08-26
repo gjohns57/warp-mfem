@@ -399,16 +399,12 @@ class MFEMSolver(SolverBase):
             g_s + (dt * dt) * G_st @ lmbda,
         )
 
-        hessian = (
-            H_x,
-            H_s,
-        )
+ 
         return backtracking_line_search(
             objective_fn,
             dof_arrays,
             search_direction,
             gradient,
-            hessian,
             self._accumulator,
             max_iterations,
             alpha0,

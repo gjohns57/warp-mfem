@@ -24,6 +24,7 @@ class AdditionalState:
         tet_materials: wp.array2d[wp.float32],
         active_tet_count: wp.array[wp.int32],
         active_particle_count: wp.array[wp.int32],
+        rest_particle_q: wp.array[wp.vec3],
     ):
         self.tet_indices = tet_indices
         self.tet_stretch = tet_stretch
@@ -32,6 +33,8 @@ class AdditionalState:
         self.tet_materials = tet_materials
         self.active_tet_count = active_tet_count
         self.active_particle_count = active_particle_count
+
+        self.rest_particle_q = rest_particle_q
 
     @classmethod
     def from_model(
@@ -46,6 +49,10 @@ class AdditionalState:
         tet_materials = wp.empty((max_tets, 3), dtype=wp.float32)
         active_tet_count = wp.array([model.tet_count], dtype=wp.int32)
         active_particle_count = wp.zeros(1, dtype=wp.int32)
+        # model.particle_q holds each particle's build-time (rest) position;
+        # if the caller padded particle_count for refinement headroom, the
+        # padding slots come along too, which is fine since they're inactive.
+        rest_particle_q = wp.clone(model.particle_q)
 
         wp.copy(tet_indices, model.tet_indices)
         wp.copy(tet_poses, model.tet_poses)
@@ -80,6 +87,7 @@ class AdditionalState:
             tet_materials,
             active_tet_count,
             active_particle_count,
+            rest_particle_q,
         )
 
     def clone(self):
@@ -91,4 +99,15 @@ class AdditionalState:
             wp.clone(self.tet_materials),
             wp.clone(self.active_tet_count),
             wp.clone(self.active_particle_count),
+            wp.clone(self.rest_particle_q),
         )
+    
+    def asign(self, other: AdditionalState):
+        wp.copy(other.active_particle_count, self.active_particle_count)
+        wp.copy(other.active_tet_count, self.active_tet_count)
+        wp.copy(other.rest_particle_q, self.rest_particle_q)
+        wp.copy(other.tet_indices, self.tet_indices)
+        wp.copy(other.tet_lambda, self.tet_lambda)
+        wp.copy(other.tet_poses, self.tet_poses)
+        wp.copy(other.tet_stretch, self.tet_stretch)
+        wp.copy(other.tet_materials, self.tet_materials)

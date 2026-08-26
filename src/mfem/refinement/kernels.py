@@ -216,13 +216,14 @@ def compute_H_lmbda_G_x_blocks(
     H_lmbda_G_x_blocks: wp.array[mat63],
 ):
     tid = wp.tid()
-    if tid >= active_tet_count[0] * 4:
+    if tid >= active_tet_count[0]:
         return
 
-    H_lmbda_G_x_blocks[tid] = H_lmbda_blocks[tid // 4] * G_x_blocks[tid]
-    H_lmbda_G_x_blocks[4 * tid + 1] = H_lmbda_blocks[tid] * G_x_blocks[4 * tid + 1]
-    H_lmbda_G_x_blocks[4 * tid + 2] = H_lmbda_blocks[tid] * G_x_blocks[4 * tid + 2]
-    H_lmbda_G_x_blocks[4 * tid + 3] = H_lmbda_blocks[tid] * G_x_blocks[4 * tid + 3]
+    H = H_lmbda_blocks[tid]
+    H_lmbda_G_x_blocks[tid * 4 + 0] = H * G_x_blocks[tid * 4 + 0]
+    H_lmbda_G_x_blocks[tid * 4 + 1] = H * G_x_blocks[tid * 4 + 1]
+    H_lmbda_G_x_blocks[tid * 4 + 2] = H * G_x_blocks[tid * 4 + 2]
+    H_lmbda_G_x_blocks[tid * 4 + 3] = H * G_x_blocks[tid * 4 + 3]
 
 
 @wp.kernel

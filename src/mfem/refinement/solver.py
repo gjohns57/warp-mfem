@@ -1,42 +1,21 @@
-from time import sleep
-from tkinter.constants import N
 from typing import Any, override
 
-import matplotlib.pyplot as plt
 import numpy as np
 from mfem.refinement.additional_state import AdditionalState
-from mfem.refinement.utils import INV_SYM, SYM
-from numpy._core import add
-from numpy.linalg import inv
-from pandas.io.formats.info import series_examples_sub
-from pyglet.gl.gl_compat import GL_LIST_MODE
 import warp as wp
 import warp.sparse as ws
 import warp.optim.linear
 from newton import Contacts, Control, Model, State
 from newton.solvers import SolverBase
-from newton.viewer import ViewerUSD
-from warp.optim.linear import cg
 
-from mfem.accumulate import TiledAccumulator
 from mfem.boundary_condition import DirichletBoundaryCondition
 
-from mfem.energies.material_model import StretchMaterialModel
-from mfem.kernels import (
-    constraint_objective_kernel,
-    evaluate_constraint_gradient_dx,
-    evaluate_constraints,
-    kinetic_objective_kernel,
-    precompute_bsr_topology,
-    precompute_mass_matrix,
-    precompute_rest_volumes,
-    precompute_tet_stretch,
-)
 
+from mfem.refinement.contact import Contact
 from mfem.refinement.elastic_energy import arap_energy
 from mfem.refinement.kernels import compute_H_lmbda_G_x_blocks, compute_H_lmbda_blocks, compute_constraints, compute_g_lmbda, extract_attachment_indices, get_particle_velocity, integrate_particles, get_mass_diagonal_and_attachment, kinetic_gradient_kernel, local_solve_lambda, local_solve_stretch, update_constraint_gradient_topology
+from mfem.refinement.refinement_human_made import refine, RefinementBuffers
 from mfem.types import mat33, mat612, mat63, mat66, vec3, vec6
-from mfem.utils import linear_accumulate, plot_bsr
 
 mat36 = wp.types.matrix(shape=(3, 6), dtype=wp.float32)
 
@@ -46,10 +25,12 @@ class RefinementSolver(SolverBase):
         model: Model,
         iterations: int,
         max_tets: int,
+        refine_every_n_steps: int = 10,
+        min_refine_score: float = 10.1,
         **kwargs,
     ):
         super().__init__(model)
-
+        self._step = -1
         self._timings = {}
 
         energy_arg = kwargs.get("energy", "arap")
@@ -63,9 +44,15 @@ class RefinementSolver(SolverBase):
 
         self.max_particles = self.model.particle_count
         self.max_tets = max_tets
-        self._max_incident_tet_counts = wp.array(np.bincount(model.tet_indices.numpy().flatten(), minlength=self.max_particles), dtype=wp.int32)
+        self.refine_every_n_steps = refine_every_n_steps
+        self.min_refine_score = min_refine_score
+
+        headroom_factor = max(1, self.max_tets // max(1, model.tet_count))
+        original_incident_counts = np.bincount(model.tet_indices.numpy().flatten(), minlength=self.max_particles)
+        self._max_incident_tet_counts = int(original_incident_counts.max()) * headroom_factor
         self._additional_state_0 = AdditionalState.from_model(model, max_tets)
         self._additional_state_1 = self._additional_state_0.clone()
+        self._refine_buffers = RefinementBuffers(max_tets, self.max_particles, threshold=min_refine_score)
 
         # Scratch memory
         self._bsr_axpy_work_arrays = ws.bsr_axpy_work_arrays()
@@ -78,16 +65,13 @@ class RefinementSolver(SolverBase):
         self._grad_constraints_dx_blocks = wp.zeros(self.max_tets * 4, dtype=mat63)
         self._H_lmbda_grad_constraints_dx_blocks = wp.zeros(self.max_tets * 4, dtype=mat63)
 
+        self._particle_q_tilde = wp.zeros(self.max_particles, dtype=wp.vec3)
 
-        self._particle_q_tilde = wp.empty(self.max_particles, dtype=wp.vec3)
-
-        # For the line search
-        self._elastic_energy = wp.empty(self.max_tets, dtype=wp.float32)
+        self._elastic_energy = wp.zeros(self.max_tets, dtype=wp.float32)
 
         self._precompute_mass_matrix_and_attachments()
         self._update_constraint_gradient_topology(self._additional_state_0)
 
-        # For assembling the solver iteration system
         self._hessian_ds_blocks = wp.empty(self.max_tets, dtype=mat66)
         self._inv_hessian_ds_blocks = wp.empty(self.max_tets, dtype=mat66)
 
@@ -95,20 +79,32 @@ class RefinementSolver(SolverBase):
         self._transpose_grad_constraints_dx = ws.bsr_zeros(self.max_particles, self.max_tets, mat36, topology="padded", row_capacity=self._max_incident_tet_counts) #, nnz_capacity=self.max_particles * self.max_incident_tets)
         self._global_lhs = ws.bsr_zeros(self.max_particles, self.max_particles, wp.mat33, topology="padded", row_capacity=(1 + self._max_incident_tet_counts * 3)) #, nnz_capacity=self.max_particles * (1 + self.max_incident_tets * 3))
         self._global_rhs = wp.zeros(self.max_particles, dtype=wp.vec3)
-        self._gradient_ds = wp.empty(self.max_tets, dtype=vec6)
-        self._gradient_dx = wp.empty(self.max_particles, dtype=wp.vec3)
+
+        self._gradient_dx = wp.zeros(self.max_particles, dtype=wp.vec3)
+        self._gradient_ds = wp.zeros(self.max_tets, dtype=vec6)
 
         self._constraints = wp.empty(self.max_tets, dtype=vec6)
 
         self._dx = wp.zeros(self.max_particles, dtype=wp.vec3)
         self._ds = wp.zeros(self.max_tets, dtype=vec6)
 
-        # I think this doesn't actually need any adjustment unless we want to add attachments
-
-        # Scratch arrays for assemble system
         self._H_lmbda_blocks = wp.empty(self.max_tets, dtype=mat66)
         self._g_lmbda_blocks = wp.empty(self.max_tets, dtype=vec6)
         self._grad_constraints_dx_block_count = wp.empty(1, dtype=wp.int32)
+
+        contact_d0 = kwargs.get("contact_d0", 1.0e-2)
+        contact_d1 = kwargs.get("contact_d1", 5.0e-2)
+        contact_stiffness = kwargs.get("contact_stiffness", 1.0e4)
+        self._contact = Contact(model, self.max_particles, contact_d0, contact_d1, contact_stiffness)
+        self._contact_hessian_dx = ws.bsr_zeros(
+            self.max_particles,
+            self.max_particles,
+            wp.mat33,
+            topology="padded",
+            row_capacity=1,
+            nnz_capacity=self.max_particles,
+        )
+        self._contact_hessian_axpy_work_arrays = ws.bsr_axpy_work_arrays()
 
         self.iterations = iterations
 
@@ -131,6 +127,10 @@ class RefinementSolver(SolverBase):
         self._mass_diagonal_blocks = wp.empty(self.max_particles, dtype=wp.mat33)
         self._diag_row_indices = wp.empty(self.max_particles, dtype=wp.int32)
         self._diag_col_indices = wp.empty_like(self._diag_row_indices)
+        # Scratch output for _refresh_mass_matrix's reuse of
+        # get_mass_diagonal_and_attachment; attachments are static (never
+        # re-derived after a refine pass) so this is never read there.
+        self._refine_attachment_predicate_scratch = wp.empty(self.max_particles, dtype=wp.int32)
 
         wp.launch(
             get_mass_diagonal_and_attachment,
@@ -160,9 +160,10 @@ class RefinementSolver(SolverBase):
         )
 
         self._mass_matrix = ws.bsr_zeros(
-            self.model.particle_count,
-            self.model.particle_count,
+            self.max_particles,
+            self.max_particles,
             wp.mat33,
+            topology="padded",
             row_capacity=1,
             nnz_capacity=self.max_particles,
         )
@@ -172,12 +173,58 @@ class RefinementSolver(SolverBase):
             self._diag_row_indices,
             self._diag_row_indices,
             self._mass_diagonal_blocks,
-            count=self._additional_state_0.active_particle_count
+            count=self._additional_state_0.active_particle_count,
+            topology="padded",
         )
         self._attachments = None
         if self._attachment_count != 0:
             self._attachments = DirichletBoundaryCondition(wp.clone(self.model.particle_q[self._attachment_indices]), self._attachment_indices, wp.full(self._attachment_count, 1.0e1, dtype=wp.float32), self.max_particles)
-            self._hessian_dx = self._mass_matrix + self._attachments.hessian()
+            # Preallocated + rebuilt via bsr_axpy (rather than the `+`
+            # operator, whose allocation behavior we don't want to depend on)
+            # so this can be refreshed from inside a captured refine pass.
+            self._hessian_dx = ws.bsr_zeros(
+                self.max_particles,
+                self.max_particles,
+                wp.mat33,
+                topology="padded",
+                row_capacity=1,
+                nnz_capacity=self.max_particles,
+            )
+            self._hessian_refresh_work_arrays = ws.bsr_axpy_work_arrays()
+            ws.bsr_axpy(self._mass_matrix, self._hessian_dx, alpha=1.0, beta=0.0, work_arrays=self._hessian_refresh_work_arrays, topology="padded")
+            ws.bsr_axpy(self._attachments.hessian(), self._hessian_dx, alpha=1.0, beta=1.0, work_arrays=self._hessian_refresh_work_arrays, topology="padded")
+
+    def _refresh_mass_matrix(self, additional_state: AdditionalState):
+        """Re-derives self._mass_matrix (and, if present, self._hessian_dx)
+        for the just-refined additional_state. Attachment points themselves
+        are not re-derived: new vertices are never automatically pinned."""
+        wp.launch(
+            get_mass_diagonal_and_attachment,
+            dim=self.max_particles,
+            inputs=[
+                additional_state.active_particle_count,
+                self.model.particle_inv_mass,
+            ],
+            outputs=[
+                self._refine_attachment_predicate_scratch,
+                self._diag_row_indices,
+                self._diag_col_indices,
+                self._mass_diagonal_blocks,
+            ],
+        )
+
+        ws.bsr_set_from_triplets(
+            self._mass_matrix,
+            self._diag_row_indices,
+            self._diag_row_indices,
+            self._mass_diagonal_blocks,
+            count=additional_state.active_particle_count,
+            topology="padded",
+        )
+
+        if self._attachments is not None:
+            ws.bsr_axpy(self._mass_matrix, self._hessian_dx, alpha=1.0, beta=0.0, work_arrays=self._hessian_refresh_work_arrays, topology="padded")
+            ws.bsr_axpy(self._attachments.hessian(), self._hessian_dx, alpha=1.0, beta=1.0, work_arrays=self._hessian_refresh_work_arrays, topology="padded")
 
 
 
@@ -192,17 +239,31 @@ class RefinementSolver(SolverBase):
     ) -> None:
         additional_state_0 = self._additional_state_0
         additional_state_1 = self._additional_state_1
+        self._step += 1
 
-        # We can do refinement here 
+        # state_out becomes the live working buffer immediately, so
+        # refinement can write new-vertex data into it; state_in is never
+        # mutated by this solver from this point on.
+        state_out.assign(state_in)
 
+        refine(self.model, 1.0, state_in, state_out, additional_state_0, additional_state_1, self._refine_buffers, self._elastic_energy, self._contact.barrier_energy)
+
+        self._update_constraint_gradient_topology(additional_state_1)
+        self._refresh_mass_matrix(additional_state_1)
+        self._update_hessian_blocks = True
+        # additional_state_1 is now fully valid (topology + all per-tet
+        # fields + active_tet_count/active_particle_count) regardless of
+        # whether an actual refine pass fired this step.
+
+        wp.copy(state_in.particle_q, state_out.particle_q)
 
         wp.launch(
             integrate_particles,
-            dim=self.model.particle_count,
+            dim=self.max_particles,
             inputs=[
-                additional_state_0.active_particle_count,
-                state_in.particle_q,
-                state_in.particle_qd,
+                additional_state_1.active_particle_count,
+                state_out.particle_q,
+                state_out.particle_qd,
                 self.model.gravity,
                 dt,
             ],
@@ -210,9 +271,6 @@ class RefinementSolver(SolverBase):
                 self._particle_q_tilde,
             ],
         )
-
-        state_out.assign(state_in)
-        wp.copy(additional_state_1.tet_lambda, additional_state_0.tet_lambda)
 
         for i in range(self.iterations):
             with wp.ScopedTimer("Update system", dict=self._timings):
@@ -235,11 +293,17 @@ class RefinementSolver(SolverBase):
 
             # Here is where we need to add line search
 
+        # Deliberately guarded on the OLD (pre-refinement) count, not
+        # additional_state_1's: this finite-differences against
+        # state_in.particle_q, which has no meaningful "before" for a vertex
+        # that didn't exist before this step. New vertices keep the
+        # interpolated velocity claim_new_vertices() already wrote into
+        # state_out.particle_qd instead.
         wp.launch(
             get_particle_velocity,
-            dim=self.model.particle_count,
+            dim=self.max_particles,
             inputs=[
-                additional_state_0.active_particle_count,
+                additional_state_1.active_particle_count,
                 state_out.particle_q,
                 state_in.particle_q,
                 dt,
@@ -248,6 +312,8 @@ class RefinementSolver(SolverBase):
                 state_out.particle_qd,
             ],
         )
+
+        self._additional_state_1.asign(self._additional_state_0)
 
     def _global_solve(self, H: ws.BsrMatrix, g: wp.array, guess: wp.array) -> wp.array:
         dx = guess
@@ -282,6 +348,7 @@ class RefinementSolver(SolverBase):
         self._compute_kinetic_derivatives(state, additional_state, dt)
         self._compute_elastic_derivatives(state, additional_state)
         self._compute_constraints(state, additional_state)
+        self._contact.evaluate(self.model, state, additional_state)
 
     def _assemble_system(self, state: State, additional_state: AdditionalState, dt: float) -> tuple[ws.BsrMatrix, wp.array]:
 
@@ -339,7 +406,7 @@ class RefinementSolver(SolverBase):
 
         wp.launch(
             compute_H_lmbda_G_x_blocks,
-            dim=self.max_tets * 4,
+            dim=self.max_tets,
             inputs=[
                 additional_state.active_tet_count,
                 H_lmbda_blocks,
@@ -376,6 +443,7 @@ class RefinementSolver(SolverBase):
             transpose=True,
             beta=-1.0,
         )
+        g -= self._contact.barrier_gradient
 
         ws.bsr_axpy(
             self._hessian_dx,
@@ -385,6 +453,21 @@ class RefinementSolver(SolverBase):
             topology="padded",
         )
 
+        ws.bsr_set_from_triplets(
+            self._contact_hessian_dx,
+            self._diag_row_indices,
+            self._diag_col_indices,
+            self._contact.barrier_hessian_blocks,
+            count=additional_state.active_particle_count,
+            topology="padded",
+        )
+        ws.bsr_axpy(
+            self._contact_hessian_dx,
+            H,
+            alpha=1.0,
+            work_arrays=self._contact_hessian_axpy_work_arrays,
+            topology="padded",
+        )
 
         return H, g
 

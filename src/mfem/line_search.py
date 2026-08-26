@@ -78,7 +78,6 @@ def backtracking_line_search(
     dof_arrays: tuple[wp.array],
     search_direction: tuple[wp.array],
     gradient: tuple[wp.array],
-    hessians: tuple[ws.BsrMatrix],
     accumulator: TiledAccumulator,
     max_iterations=10,
     alpha0=1.0,

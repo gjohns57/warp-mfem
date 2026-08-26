@@ -33,6 +33,17 @@ def pack_tri(tri: wp.vec3i) -> wp.uint64:
 
 
 @wp.func
+def hashtable_probe_slot(index: wp.int32, i: wp.int32, size: wp.int32) -> wp.int32:
+    # i*i is computed in 64-bit so it can't wrap into a negative int32 once i
+    # exceeds ~46340 (sqrt(INT32_MAX)) -- easily reached for hash tables with
+    # tens of thousands of slots -- which previously produced a negative
+    # array index and an out-of-bounds access.
+    i64 = wp.int64(i)
+    offset = wp.int32((wp.int64(index) + i64 * i64) % wp.int64(size))
+    return offset
+
+
+@wp.func
 def hashtable_insert(
     keys: wp.array[wp.uint64],
     size: wp.int32,
@@ -41,13 +52,21 @@ def hashtable_insert(
 ) -> tuple[wp.int32, wp.bool]:
     index = wp.int32(hash64(key) % wp.uint64(size))
     i = wp.int32(0)
+    slot = index % size
 
-    test = wp.atomic_cas(keys, (index + i * i) % size, empty, key)
-    while test != empty and test != key:
+    test = wp.atomic_cas(keys, slot, empty, key)
+    # Quadratic probing on (index + i*i) % size only ever reaches at most
+    # ceil(size/2) distinct slots from a given index (since i and size - i
+    # land on the same slot), so probing beyond `size` steps can never find
+    # a slot the first `size` steps didn't already reach. Bounding the loop
+    # here avoids spinning forever when that reachable neighborhood is
+    # completely full.
+    while test != empty and test != key and i < size:
         i += 1
-        test = wp.atomic_cas(keys, (index + i * i) % size, empty, key)
+        slot = hashtable_probe_slot(index, i, size)
+        test = wp.atomic_cas(keys, slot, empty, key)
 
-    return (index + i * i, test == empty)
+    return (slot, test == empty)
 
 
 @wp.func
@@ -59,13 +78,24 @@ def hashtable_find(
 ) -> wp.int32:
     index = wp.int32(hash64(key) % wp.uint64(size))
     i = wp.int32(0)
+    slot = index % size
 
-    test = keys[(index + i * i) % size]
-    while test != key and test != empty:
+    test = keys[slot]
+    # See hashtable_insert for why bounding by `size` steps is safe and sufficient.
+    while test != key and test != empty and i < size:
         i += 1
-        test = keys[(index + i * i) % size]
+        slot = hashtable_probe_slot(index, i, size)
+        test = keys[slot]
 
-    return (index + i * i) % size
+    return slot
+
+
+@wp.func
+def canonical_edge(a: wp.int32, b: wp.int32) -> wp.vec2i:
+    """Order-independent edge key: (a, b) and (b, a) must hash identically,
+    since the two tets sharing an edge generally store its endpoints in
+    different local vertex slots."""
+    return wp.vec2i(wp.min(a, b), wp.max(a, b))
 
 
 @wp.func
@@ -102,6 +132,8 @@ def hashmap_find_edge(
         return -1
 
 
+# It doesn't seem like this is a good idea since any keys that probed past this
+# key will now appear as if they are not in the hashset
 @wp.func
 def hashmap_remove_edge(
     keys: wp.array[wp.uint64],
