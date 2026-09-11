@@ -1,0 +1,14 @@
+{
+  "friction_mu_tool": {
+    "flag": "--friction-mu-tool",
+    "values": [0.2, 0.297, 0.5, 0.7, 0.9]
+  },
+  "friction_mu_ground": {
+    "flag": "--friction-mu-ground",
+    "values": [0.2, 0.3, 0.5, 0.7, 0.9, 1.2]
+  },
+  "friction_eps_v": {
+    "flag": "--friction-eps-v",
+    "values": [0.0025, 0.005, 0.01, 0.02]
+  }
+}

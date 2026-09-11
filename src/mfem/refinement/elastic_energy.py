@@ -3,7 +3,14 @@ from mfem.refinement.utils import INV_SYM, SYM
 from mpmath import e1
 import warp as wp
 import warp.sparse as ws
+from mfem.numerical import psd_fix_6
 from mfem.types import mat66, vec6
+from mfem.utils import (
+    det_sym_vec6,
+    frob2_sym_vec6,
+    grad_det_sym_vec6,
+    hess_det_sym_vec6,
+)
 # from mfem.refinement.solver import AdditionalState
 # from mfem.refinement.utils import sym6_to_mat33, grad_det_sym_vec6
 from newton import State
@@ -133,13 +140,39 @@ def arap_energy_kernel(
     mu = tet_materials[tid, 0]
     I1 = elastic_invariant1(tet_stretch[tid])
     I2 = elastic_invariant2(tet_stretch[tid])
-    vol = 6.0 / (wp.determinant(tet_poses[tid]))
+    # tet_poses holds the inverse rest pose (DmInv), so the true rest volume
+    # is det(Dm)/6 = 1/(6 * det(DmInv)).
+    vol = 1.0 / (6.0 * wp.determinant(tet_poses[tid]))
 
     energy[tid] = vol * (
         mu * (I2 + 3.0 - 2.0 * I1) / 2.0
     )
     gradient[tid] = vol * (
         mu * (grad_elastic_invariant2(tet_stretch[tid]) - 2.0 * grad_elastic_invariant1(tet_stretch[tid])) / 2.0
+    )
+
+
+@wp.kernel
+def arap_energy_only_kernel(
+    active_tet_count: wp.array[wp.int32],
+    tet_stretch: wp.array[vec6],
+    tet_materials: wp.array2d[wp.float32],
+    tet_poses: wp.array[wp.mat33],
+    energy: wp.array[wp.float32],
+):
+    tid = wp.tid()
+    if tid >= active_tet_count[0]:
+        return
+
+    mu = tet_materials[tid, 0]
+    I1 = elastic_invariant1(tet_stretch[tid])
+    I2 = elastic_invariant2(tet_stretch[tid])
+    # tet_poses holds the inverse rest pose (DmInv), so the true rest volume
+    # is det(Dm)/6 = 1/(6 * det(DmInv)).
+    vol = 1.0 / (6.0 * wp.determinant(tet_poses[tid]))
+
+    energy[tid] = vol * (
+        mu * (I2 + 3.0 - 2.0 * I1) / 2.0
     )
 
 
@@ -156,7 +189,9 @@ def arap_energy_hessian_kernel(
         return
 
     mu = tet_materials[tid, 0]
-    vol = 6.0 / (wp.determinant(tet_poses[tid]))
+    # tet_poses holds the inverse rest pose (DmInv), so the true rest volume
+    # is det(Dm)/6 = 1/(6 * det(DmInv)).
+    vol = 1.0 / (6.0 * wp.determinant(tet_poses[tid]))
 
     hessian_blocks[tid] = mu * vol * SYM
     inv_hessian_blocks[tid] = 1.0 / (mu * vol) * INV_SYM
@@ -169,7 +204,24 @@ def arap_energy(
     hessian_blocks: wp.array[mat66],
     inv_hessian_blocks: wp.array[mat66],
     update_hessian_blocks: bool,
+    energy_only: bool = False,
 ) -> None:
+    if energy_only:
+        wp.launch(
+            arap_energy_only_kernel,
+            dim=additional_state.tet_indices.shape[0],
+            inputs=[
+                additional_state.active_tet_count,
+                additional_state.tet_stretch,
+                additional_state.tet_materials,
+                additional_state.tet_poses,
+            ],
+            outputs=[
+                energy,
+            ],
+        )
+        return
+
     if update_hessian_blocks:
         wp.launch(
             arap_energy_hessian_kernel,
@@ -199,6 +251,161 @@ def arap_energy(
             gradient,
         ],
     )
+
+@wp.kernel
+def neohookean_energy_kernel(
+    active_tet_count: wp.array[wp.int32],
+    tet_stretch: wp.array[vec6],
+    tet_materials: wp.array2d[wp.float32],
+    tet_poses: wp.array[wp.mat33],
+    energy: wp.array[wp.float32],
+    gradient: wp.array[vec6],
+):
+    tid = wp.tid()
+    if tid >= active_tet_count[0]:
+        return
+
+    mu = tet_materials[tid, 0]
+    lmbda = tet_materials[tid, 1]
+    # tet_poses holds the inverse rest pose (DmInv), so the true rest volume
+    # is det(Dm)/6 = 1/(6 * det(DmInv)).
+    vol = 1.0 / (6.0 * wp.determinant(tet_poses[tid]))
+
+    s = tet_stretch[tid]
+    I2 = frob2_sym_vec6(s)
+    J = det_sym_vec6(s)
+    gradJds = grad_det_sym_vec6(s)
+
+    energy[tid] = vol * (
+        mu * (I2 - 3.0) / 2.0 - mu * (J - 1.0) + lmbda / 2.0 * (J - 1.0) * (J - 1.0)
+    )
+    gradient[tid] = vol * (
+        mu * SYM * s + (lmbda * (J - 1.0) - mu) * gradJds
+    )
+
+
+@wp.kernel
+def neohookean_energy_only_kernel(
+    active_tet_count: wp.array[wp.int32],
+    tet_stretch: wp.array[vec6],
+    tet_materials: wp.array2d[wp.float32],
+    tet_poses: wp.array[wp.mat33],
+    energy: wp.array[wp.float32],
+):
+    tid = wp.tid()
+    if tid >= active_tet_count[0]:
+        return
+
+    mu = tet_materials[tid, 0]
+    lmbda = tet_materials[tid, 1]
+    # tet_poses holds the inverse rest pose (DmInv), so the true rest volume
+    # is det(Dm)/6 = 1/(6 * det(DmInv)).
+    vol = 1.0 / (6.0 * wp.determinant(tet_poses[tid]))
+
+    s = tet_stretch[tid]
+    I2 = frob2_sym_vec6(s)
+    J = det_sym_vec6(s)
+
+    energy[tid] = vol * (
+        mu * (I2 - 3.0) / 2.0 - mu * (J - 1.0) + lmbda / 2.0 * (J - 1.0) * (J - 1.0)
+    )
+
+
+@wp.kernel
+def neohookean_energy_hessian_kernel(
+    active_tet_count: wp.array[wp.int32],
+    tet_stretch: wp.array[vec6],
+    tet_materials: wp.array2d[wp.float32],
+    tet_poses: wp.array[wp.mat33],
+    hessian_blocks: wp.array[mat66],
+    inv_hessian_blocks: wp.array[mat66],
+):
+    tid = wp.tid()
+    if tid >= active_tet_count[0]:
+        return
+
+    mu = tet_materials[tid, 0]
+    lmbda = tet_materials[tid, 1]
+    # tet_poses holds the inverse rest pose (DmInv), so the true rest volume
+    # is det(Dm)/6 = 1/(6 * det(DmInv)).
+    vol = 1.0 / (6.0 * wp.determinant(tet_poses[tid]))
+
+    s = tet_stretch[tid]
+    J = det_sym_vec6(s)
+    gradJds = grad_det_sym_vec6(s)
+    hessJds = hess_det_sym_vec6(s)
+
+    hess = vol * (
+        mu * SYM
+        + lmbda * wp.outer(gradJds, gradJds)
+        + (lmbda * (J - 1.0) - mu) * hessJds
+    )
+
+    fix = psd_fix_6(hess)
+    hessian_blocks[tid] = fix.mat
+    inv_hessian_blocks[tid] = fix.inv
+
+
+def neohookean_energy(
+    state: State,
+    additional_state: AdditionalState,
+    energy: wp.array[wp.float32],
+    gradient: wp.array[vec6],
+    hessian_blocks: wp.array[mat66],
+    inv_hessian_blocks: wp.array[mat66],
+    update_hessian_blocks: bool,
+    energy_only: bool = False,
+) -> None:
+    if energy_only:
+        wp.launch(
+            neohookean_energy_only_kernel,
+            dim=additional_state.tet_indices.shape[0],
+            inputs=[
+                additional_state.active_tet_count,
+                additional_state.tet_stretch,
+                additional_state.tet_materials,
+                additional_state.tet_poses,
+            ],
+            outputs=[
+                energy,
+            ],
+        )
+        return
+
+    # Unlike ARAP, the Neo-Hookean Hessian depends on the current stretch, so
+    # the caller is expected to request an update every Newton iteration (see
+    # RefinementSolver._hessian_update_policy).
+    if update_hessian_blocks:
+        wp.launch(
+            neohookean_energy_hessian_kernel,
+            dim=additional_state.tet_indices.shape[0],
+            inputs=[
+                additional_state.active_tet_count,
+                additional_state.tet_stretch,
+                additional_state.tet_materials,
+                additional_state.tet_poses,
+            ],
+            outputs=[
+                hessian_blocks,
+                inv_hessian_blocks,
+            ],
+        )
+
+    wp.launch(
+        neohookean_energy_kernel,
+        dim=additional_state.tet_indices.shape[0],
+        inputs=[
+            additional_state.active_tet_count,
+            additional_state.tet_stretch,
+            additional_state.tet_materials,
+            additional_state.tet_poses,
+        ],
+        outputs=[
+            energy,
+            gradient,
+        ],
+    )
+
 
 def neohookean(eig: np.ndarray, mu: float, lmbda: float) -> float:
     I2 = eig[0] * eig[0] + eig[1] * eig[1] + eig[2] * eig[2]

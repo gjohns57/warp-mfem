@@ -30,6 +30,29 @@ def get_mass_diagonal_and_attachment(
     col_indices[tid] = tid
 
 @wp.kernel
+def invert_diag_blocks(
+    active_particle_count: wp.array[wp.int32],
+    diag_blocks: wp.array[wp.mat33],
+    singular_threshold: wp.float32,
+    inv_diag_blocks: wp.array[wp.mat33],
+):
+    """Builds the block-Jacobi preconditioner M ~= blockdiag(H)^-1 for the global
+    CG solve: inverts each 3x3 diagonal block of H. Padded rows past
+    active_particle_count (and any structurally-empty/singular block, i.e. one
+    whose |det| < singular_threshold) fall back to identity so the preconditioner
+    stays finite over the full padded system."""
+    tid = wp.tid()
+    if tid >= active_particle_count[0]:
+        inv_diag_blocks[tid] = wp.identity(3, dtype=wp.float32)
+        return
+
+    block = diag_blocks[tid]
+    if wp.abs(wp.determinant(block)) < singular_threshold:
+        inv_diag_blocks[tid] = wp.identity(3, dtype=wp.float32)
+    else:
+        inv_diag_blocks[tid] = wp.inverse(block)
+
+@wp.kernel
 def precompute_tet_stretch(
     particle_q: wp.array[wp.vec3],
     tet_indices: wp.array2d[wp.int32],
@@ -258,6 +281,72 @@ def local_solve_stretch(
         return
 
     ds[tid] = -inv_hessian_ds_blocks[tid] * (SYM * new_lmbda[tid] + g_s[tid])
+
+@wp.kernel
+def kinetic_objective_kernel(
+    active_particle_count: wp.array[wp.int32],
+    particle_q: wp.array[wp.vec3],
+    particle_q_tilde: wp.array[wp.vec3],
+    particle_mass: wp.array[wp.float32],
+    objective: wp.array[wp.float32],
+):
+    tid = wp.tid()
+    if tid >= active_particle_count[0]:
+        return
+
+    d = particle_q[tid] - particle_q_tilde[tid]
+    objective[tid] = 0.5 * particle_mass[tid] * wp.dot(d, d)
+
+
+@wp.kernel
+def add_constraint_objective(
+    active_tet_count: wp.array[wp.int32],
+    tet_indices: wp.array2d[wp.int32],
+    tet_poses: wp.array[wp.mat33],
+    particle_q: wp.array[wp.vec3],
+    stretch: wp.array[vec6],
+    lmbda: wp.array[vec6],
+    objective: wp.array[wp.float32],
+):
+    """Adds -lambda . constraint(x, s) to the (already-populated) per-tet objective energy."""
+    tid = wp.tid()
+    if tid >= active_tet_count[0]:
+        return
+
+    x0 = particle_q[tet_indices[tid, 0]]
+    x1 = particle_q[tet_indices[tid, 1]]
+    x2 = particle_q[tet_indices[tid, 2]]
+    x3 = particle_q[tet_indices[tid, 3]]
+    s = stretch[tid]
+
+    e01 = x1 - x0
+    e02 = x2 - x0
+    e03 = x3 - x0
+    deformed_pos = wp.matrix_from_cols(e01, e02, e03)
+    inv_rest_pose = tet_poses[tid]
+    F = deformed_pos * inv_rest_pose
+
+    U, sigma, V = rotational_svd(F)
+    sF = mat33_to_sym6(stretch_component(U, sigma, V))
+    constraint = SYM * (sF - s)
+
+    objective[tid] -= wp.dot(constraint, lmbda[tid])
+
+
+@wp.kernel
+def stretch_lagrangian_gradient_kernel(
+    active_tet_count: wp.array[wp.int32],
+    gradient_ds: wp.array[vec6],
+    lmbda: wp.array[vec6],
+    gradient_out: wp.array[vec6],
+):
+    """gradient_out = gradient_ds + SYM @ lmbda, i.e. the s-gradient of the Lagrangian used for the line search."""
+    tid = wp.tid()
+    if tid >= active_tet_count[0]:
+        return
+
+    gradient_out[tid] = gradient_ds[tid] + SYM * lmbda[tid]
+
 
 @wp.kernel
 def get_particle_velocity(

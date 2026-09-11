@@ -1,669 +1,1322 @@
-"""CUDA-graph-safe adaptive mesh refinement for RefinementSolver.
-
-Ports the candidate-scoring / conflict-resolution / edge-bisection logic from
-mesh_topology.py's FEMTopology.split_edges() (dynamic allocation, host
-readbacks) into a fixed-buffer form: every scratch array is preallocated once
-to a static ceiling and reused via `wp.copy`/atomic-append counters, so this
-can run inside a captured CUDA graph.
-
-Cadence: a real refine pass is only evaluated every `refine_every_n_steps`
-calls, via a device-resident counter that gates candidate *scores* rather
-than branching (see refine()'s docstring for why). additional_state_0 always
-plays the "current mesh" role and additional_state_1 the "scratch, rebuilt
-every step" role -- RefinementSolver.step() keeps these as fixed Python
-object references and copies additional_state_1's final content back into
-additional_state_0 at the end of every step (see copy_additional_state),
-rather than swapping which object plays which role.
-
-That copy-back, not a swap, is deliberate: unlike the newton.State
-state_in/state_out swap (which happens in the *caller*, between separate,
-uncaptured calls to solver.step()), additional_state_0/_1 are swapped
-*inside* step() itself. A CUDA graph permanently bakes in the specific
-device pointers each captured kernel reads/writes; reassigning a Python
-attribute after the fact doesn't change what an already-captured graph does
-on replay. So a plain `self._additional_state_0, self._additional_state_1 =
-self._additional_state_1, self._additional_state_0` would only "take effect"
-for calls still inside the same capture trace (irrelevant here, since
-solver.step() is called once per trace) -- across separate capture_launch
-replays, whichever object was captured as the read side would silently stay
-frozen at whatever it held at capture time. Copying data into a fixed
-additional_state_0 avoids this trap entirely.
-
-Because a linear tet's deformation gradient F is constant over the whole
-element, and an affine map commutes with taking a midpoint, splitting a tet
-at the true rest-space midpoint of an edge (not just its current-space
-midpoint) gives each child *exactly* the same F as the parent. That's why
-AdditionalState carries a `rest_particle_q` buffer: it lets a new child's
-tet_pose be recomputed exactly, and its tet_stretch/tet_lambda inherited
-verbatim from the parent instead of reset (no discontinuity).
-"""
-
-import numpy as np
 import warp as wp
-
+from newton import State, Model, GeoType
 from mfem.refinement.additional_state import AdditionalState
-from mfem.refinement.elastic_energy import arap_energy_hessian_kernel
-from mfem.refinement.geometry_hash import (
-    canonical_edge,
-    get_hashtable_size,
-    hashmap_find_edge,
-    hashmap_insert_edge,
-    hashset_find_edge,
-)
-from mfem.refinement.mesh_topology import remove_worst_candidate, update_tet_candidates
+from mfem.refinement.geometry_hash import get_hashtable_size, hashtable_find, hashtable_insert
+from mfem.refinement.contact import query_min_signed_distance
 from mfem.types import vec6
-from newton import State
 
-# Sentinel score for inactive candidate slots (padding beyond active_tet_count).
-# Must sort below every real score (real scores are non-negative lengths).
-_SENTINEL_SCORE = wp.constant(wp.float32(-1.0e30))
+class RefinementBuffers:
 
+
+    def __init__(
+        self,
+        max_tets: int,
+        max_vertices: int,
+        max_tris: int,
+        threshold: float = 0.8,
+        hashmap_load_factor: float = 0.5,
+        hashmap_edges_per_tet: int = 6,
+    ):
+        self.max_tets = max_tets
+        self.max_vertices = max_vertices
+        self.max_tris = max_tris
+        self.candidate_hashmap_size = get_hashtable_size(max_tets * hashmap_edges_per_tet, hashmap_load_factor)
+        self.candidate_hashmap_keys = wp.empty(self.candidate_hashmap_size, dtype=wp.uint64)
+        self.candidate_hashmap_scores = wp.empty(self.candidate_hashmap_size, dtype=wp.float32)
+        self.candidate_hashmap_flag = wp.empty(self.candidate_hashmap_size, dtype=wp.uint8)
+        self.tet_candidate = wp.full(max_tets, wp.vec2i(-1, -1), dtype=wp.vec2i)
+        self.tmp_rest_particle_q = wp.empty(max_vertices, dtype=wp.vec3)
+        self.tet_split_counts = wp.zeros(max_tets + 1, dtype=wp.int32)
+        self.new_vertex_index = wp.zeros(max_tets + 1, dtype=wp.int32)
+        self.threshold = wp.array([threshold], dtype=wp.float32)
+        # Set by check_split_capacity when a pass would overflow max_tets /
+        # max_vertices; the pass is then dropped (see refine()). Read it back
+        # from the host to detect a starved refinement.
+        self.split_overflow = wp.zeros(1, dtype=wp.int32)
+        # Counts refine() calls so refine_every can gate passes on the device
+        # (a host-side check would be frozen into a captured CUDA graph).
+        self.pass_counter = wp.zeros(1, dtype=wp.int32)
+        # [sum of tet strain-energy density / mu, active tet count] for the
+        # geometric score's relative elastic term (see elastic_density_stats).
+        self.elastic_density_stats = wp.zeros(2, dtype=wp.float32)
+
+        # Surface-triangle counterparts of tet_candidate/tet_split_counts,
+        # updated by scatter_tris the same way tet_candidate/tet_split_counts
+        # are updated by scatter_tets (see refine() below).
+        self.tri_candidate = wp.full(max_tris, wp.vec2i(-1, -1), dtype=wp.vec2i)
+        self.tri_split_counts = wp.zeros(max_tris + 1, dtype=wp.int32)
+
+@wp.func
+def edge_to_key(edge: wp.vec2i) -> wp.uint64:
+    return wp.cast(wp.vec2i(wp.min(*edge), wp.max(*edge)), dtype=wp.uint64)
+    
+
+CANDIDATE_AVAILABLE = wp.constant(wp.uint8(0))
+CANDIDATE_PENDING = wp.constant(wp.uint8(1))
+CANDIDATE_SELECTED = wp.constant(wp.uint8(2))
+CANDIDATE_UNAVAILABLE = wp.constant(wp.uint8(3))
+
+# Default score assigned to edges whose midpoint has penetrated a rigid shape, so
+# they always win over the threshold. Overridable per-call via refine(..., penetrating_edge_score=).
+DEFAULT_PENETRATING_EDGE_SCORE = 1.0e6
+
+# Default weights for the edge refinement score (see populate_candidates):
+#   score += (tet_score * tet_score_weight + min(vertex_score) * vertex_score_weight) * edge_length
+DEFAULT_TET_SCORE_WEIGHT = 0.0
+DEFAULT_VERTEX_SCORE_WEIGHT = 0.1
+# Default conflict-resolution sweeps for parallel edge-split selection.
+DEFAULT_CONFLICT_ITERATIONS = 5
+# Default parametric position of the new vertex along a split edge (0.5 = midpoint).
+DEFAULT_SPLIT_POSITION = 0.5
+
+# We need to change this to add more candidates
 
 @wp.kernel
-def emit_split_edge_candidates(
+def populate_candidates(
     active_tet_count: wp.array[wp.int32],
     tet_indices: wp.array2d[wp.int32],
-    tet_energy: wp.array[wp.float32],
-    should_refine: wp.array[wp.int32],
-    candidate_edges: wp.array[wp.vec2i],
-    candidate_scores: wp.array[wp.float32],
+    tet_scores: wp.array[wp.float32], # We wan't to split elements with higher elastic energy. I think this is already volume weighted
+    vertex_scores: wp.array[wp.float32],
+    particle_inv_mass: wp.array[wp.float32], # We wan't to avoid splitting edges between kinetic vertices
+    particle_q: wp.array[wp.vec3], # We want to split longer edges so we need the position data
+    shape_transform: wp.array[wp.transform],
+    shape_type: wp.array[wp.int32],
+    shape_scale: wp.array[wp.vec3],
+    shape_body: wp.array[wp.int32],
+    shape_count: wp.int32,
+    body_q: wp.array[wp.transform],
+    tet_score_weight: wp.float32,
+    vertex_score_weight: wp.float32,
+    penetrating_edge_score: wp.float32,
+    candidate_hashmap_size: wp.int32,
+    candidate_hashmap_keys: wp.array[wp.uint64],
+    candidate_hashmap_scores: wp.array[wp.float32],
 ):
-    """Every active tet nominates its 6 edges, scored by the tet's elastic
-    (ARAP) energy as of the *previous* step's SQP solve (solver._elastic_energy,
-    written by _compute_elastic_derivatives every iteration and never
-    reallocated -- refine() reads whatever it holds from the last iteration
-    of the step that just finished, before this step's own solve has run).
-    Inactive tet slots emit sentinel edges/scores so they always sort to the
-    bottom and can never be chosen as a top-K winner. On steps where
-    should_refine is 0, every real score is also forced to the sentinel, so
-    the rest of the (always-run) pipeline naturally reduces to a verbatim
-    carry-forward with zero accepted candidates -- this is what lets refine()
-    avoid wp.capture_if, whose conditional-body graphs disallow the memory
-    allocation that bsr_set_from_triplets/radix_sort_pairs perform
-    internally (fine in the unconditional graph, illegal inside a
-    conditional one)."""
-    tid = wp.tid()
-
-    if tid >= active_tet_count[0] or should_refine[0] == 0:
-        sentinel = wp.vec2i(-1, -1)
-        for k in range(6):
-            candidate_edges[tid * 6 + k] = sentinel
-            candidate_scores[tid * 6 + k] = _SENTINEL_SCORE
-        return
-
-    t0 = tet_indices[tid, 0]
-    t1 = tet_indices[tid, 1]
-    t2 = tet_indices[tid, 2]
-    t3 = tet_indices[tid, 3]
-
-    score = tet_energy[tid]
-
-    candidate_edges[tid * 6 + 0] = canonical_edge(t0, t1)
-    candidate_edges[tid * 6 + 1] = canonical_edge(t0, t2)
-    candidate_edges[tid * 6 + 2] = canonical_edge(t0, t3)
-    candidate_edges[tid * 6 + 3] = canonical_edge(t1, t2)
-    candidate_edges[tid * 6 + 4] = canonical_edge(t1, t3)
-    candidate_edges[tid * 6 + 5] = canonical_edge(t2, t3)
-    for k in range(6):
-        candidate_scores[tid * 6 + k] = score
-
-
-@wp.kernel
-def extract_top_k_candidates(
-    candidate_edges: wp.array[wp.vec2i],
-    candidate_order: wp.array[wp.int32],
-    candidate_scores_sorted: wp.array[wp.float32],
-    max_candidates: wp.int32,
-    k: wp.int32,
-    min_refine_score: wp.float32,
-    split_hashmap_size: wp.int32,
-    split_candidates: wp.array[wp.vec2i],
-    split_scores: wp.array[wp.float32],
-    split_hashmap_keys: wp.array[wp.uint64],
-    split_hashmap_values: wp.array[wp.int32],
-):
-    """Compact the top-K highest-scoring candidates (radix_sort_pairs sorts
-    ascending, so top-K is the last K slots) and seed the conflict-resolution
-    hashmap with the ones actually worth splitting."""
-    tid = wp.tid()
-    rank = max_candidates - k + tid
-    original_idx = candidate_order[rank]
-    edge = candidate_edges[original_idx]
-    score = candidate_scores_sorted[rank]
-
-    split_candidates[tid] = edge
-    split_scores[tid] = score
-
-    if score > min_refine_score:
-        hashmap_insert_edge(split_hashmap_keys, split_hashmap_values, split_hashmap_size, edge, tid)
-
-
-@wp.kernel
-def get_tet_split_edge_candidates_fixed(
-    active_tet_count: wp.array[wp.int32],
-    tet_indices: wp.array2d[wp.int32],
-    split_hashmap_keys: wp.array[wp.uint64],
-    split_hashmap_values: wp.array[wp.int32],
-    split_hashmap_size: wp.int32,
-    tet_candidates: wp.array2d[wp.int32],
-    tet_candidate_ct: wp.array[wp.int32],
-):
-    """Same logic as mesh_topology.get_tet_split_edge_candidates, but guarded
-    on active_tet_count: tids beyond it hold garbage tet_indices (never
-    written this pass) and must not be allowed to probe the shared hashmap,
-    or they could spuriously steal/pollute a conflict-resolution slot."""
     tid = wp.tid()
     if tid >= active_tet_count[0]:
-        tet_candidate_ct[tid] = 0
         return
 
-    count = 0
-    for j in range(4):
-        for i in range(j):
-            edge = canonical_edge(tet_indices[tid, i], tet_indices[tid, j])
-            candidate_index = hashmap_find_edge(split_hashmap_keys, split_hashmap_values, split_hashmap_size, edge)
-            if candidate_index != -1:
-                tet_candidates[tid, count] = candidate_index
-                count += 1
-    tet_candidate_ct[tid] = count
 
+    for i in range(4):
+        for j in range(i):
+            edge = wp.vec2i(tet_indices[tid, i], tet_indices[tid, j])
+            edge_key = edge_to_key(edge)
+            if not (particle_inv_mass[edge[0]] == 0.0 and particle_inv_mass[edge[1]] == 0.0):
+                index, _is_new_key = hashtable_insert(
+                    candidate_hashmap_keys,
+                    candidate_hashmap_size,
+                    edge_key,
+                    wp.uint64(0)
+                )
 
-@wp.kernel
-def claim_new_vertices(
-    split_candidates: wp.array[wp.vec2i],
-    split_hashmap_keys: wp.array[wp.uint64],
-    split_hashmap_size: wp.int32,
-    old_vertex_count: wp.array[wp.int32],
-    max_particles: wp.int32,
-    rest_particle_q_0: wp.array[wp.vec3],
-    particle_q: wp.array[wp.vec3],
-    particle_qd: wp.array[wp.vec3],
-    new_vertex_count: wp.array[wp.int32],
-    rest_particle_q_1: wp.array[wp.vec3],
-    candidate_new_vertex_id: wp.array[wp.int32],
-):
-    """For every candidate that survived conflict resolution, atomically
-    claim a new vertex slot and write its rest + current position/velocity
-    as the midpoint of its edge's two endpoints (rest and current
-    respectively). Vertex ids are append-only, so writing past
-    old_vertex_count never disturbs an existing particle.
+                midpoint = 0.5 * (particle_q[edge[0]] + particle_q[edge[1]])
+                midpoint_distance = query_min_signed_distance(
+                    midpoint, shape_transform, shape_type, shape_scale, shape_body, shape_count, body_q
+                )
 
-    max_particles bounds-checks the claim: it caps how many vertex slots
-    actually exist, and is unrelated to K (max_new_vertices_per_refine) --
-    without this, a claim past the buffer's end would write out of bounds
-    and silently corrupt whatever GPU memory follows it."""
-    tid = wp.tid()
-    edge = split_candidates[tid]
-    if edge[0] < 0:
-        return
-    if not hashset_find_edge(split_hashmap_keys, split_hashmap_size, edge):
-        return
+                if midpoint_distance < 0.0:
+                    wp.atomic_max(candidate_hashmap_scores, index, penetrating_edge_score)
+                else:
+                    wp.atomic_add(candidate_hashmap_scores, index, (tet_scores[tid] * tet_score_weight + (wp.min(vertex_scores[edge[0]], vertex_scores[edge[1]])) * vertex_score_weight)  * wp.length(particle_q[edge[1]] - particle_q[edge[0]]))
 
-    claimed = wp.atomic_add(new_vertex_count, 0, 1)
-    new_idx = old_vertex_count[0] + claimed
-    if new_idx >= max_particles:
-        return
-    candidate_new_vertex_id[tid] = claimed
+# ---------------------------------------------------------------------------
+# "geometric" scoring (refine(..., scoring="geometric"))
+#
+# The legacy score above sums (energy * length) over every tet incident to an
+# edge, so interior edges (valence 5-7) outscore surface edges (valence 2-4)
+# for the same physics, the weights carry units (J*m), and contact enters
+# only through the *min* endpoint barrier energy plus an SDF query at every
+# edge midpoint. The geometric score is dimensionless and per-edge:
+#
+#   score(e) = max over incident tets / surface tris of
+#              (L / h_min) * (L / L_max) * (w_e * s_elastic + w_c * s_contact)
+#
+#   L / h_min    edge length in units of the minimum edge length h_min; edges
+#                shorter than 2 h_min are never split (so no child is < h_min)
+#   L / L_max    length relative to the longest edge of that tet / tri:
+#                longest-edge bisection, which keeps element quality bounded
+#   s_elastic    how far the tet's strain-energy density / mu sits *above the
+#                mesh-wide mean*: max(0, rho / mean(rho) - 1). Relative, so a
+#                body that is strained everywhere (gravity sag, a rest shape
+#                that differs from the start pose) does not split everywhere;
+#                only the hot spots do. (Absolute rho / mu when the stats are
+#                zero, e.g. in isolation tests.)
+#   s_contact    contact proximity (d1 - d) / d1: 0 outside the barrier range,
+#                1 at the surface, > 1 when penetrating -- so penetration is
+#                still prioritised without a separate override
+#
+# Contact is taken from the tri-contact data the solver already computes: a
+# surface tri within d1 of the tool scores its edges by proximity times
+# (1 - bary of the opposite vertex), i.e. the edge nearest the closest point
+# wins and the new vertex lands where the tool actually touches. A per-vertex
+# term (capsule shapes only, so resting on the table never drives splits)
+# covers vertex-only contact. Contributions combine with atomic_max, so an
+# edge's score does not grow with its valence.
+# ---------------------------------------------------------------------------
 
-    a = edge[0]
-    b = edge[1]
-    particle_q[new_idx] = 0.5 * (particle_q[a] + particle_q[b])
-    particle_qd[new_idx] = 0.5 * (particle_qd[a] + particle_qd[b])
-    rest_particle_q_1[new_idx] = 0.5 * (rest_particle_q_0[a] + rest_particle_q_0[b])
+@wp.func
+def contact_proximity(d: wp.float32, d1: wp.float32) -> wp.float32:
+    """0 outside the barrier range, 1 at the surface, > 1 when penetrating."""
+    return wp.max((d1 - d) / d1, wp.float32(0.0))
 
 
 @wp.func
-def copy_unsplit_tet(
+def tet_elastic_density(
+    tet_energy: wp.array[wp.float32],
+    tet_materials: wp.array2d[wp.float32],
+    tet_poses: wp.array[wp.mat33],
     tid: wp.int32,
-    base: wp.int32,
-    old_tet_indices: wp.array2d[wp.int32],
-    old_tet_stretch: wp.array[vec6],
-    old_tet_lambda: wp.array[vec6],
-    old_tet_materials: wp.array2d[wp.float32],
-    old_tet_poses: wp.array[wp.mat33],
-    new_tet_indices: wp.array2d[wp.int32],
-    new_tet_stretch: wp.array[vec6],
-    new_tet_lambda: wp.array[vec6],
-    new_tet_materials: wp.array2d[wp.float32],
-    new_tet_poses: wp.array[wp.mat33],
-):
-    for i in range(4):
-        new_tet_indices[base, i] = old_tet_indices[tid, i]
-    new_tet_stretch[base] = old_tet_stretch[tid]
-    new_tet_lambda[base] = old_tet_lambda[tid]
-    for i in range(3):
-        new_tet_materials[base, i] = old_tet_materials[tid, i]
-    new_tet_poses[base] = old_tet_poses[tid]
+) -> wp.float32:
+    """Strain-energy density over mu of one tet (0 for degenerate data).
+    tet_poses holds DmInv, so rest volume = 1 / (6 det(DmInv))."""
+    vol = wp.abs(1.0 / (6.0 * wp.determinant(tet_poses[tid])))
+    mu = tet_materials[tid, 0]
+    if mu > 0.0 and vol > 0.0:
+        return wp.max(tet_energy[tid], wp.float32(0.0)) / (vol * mu)
+    return wp.float32(0.0)
 
 
 @wp.kernel
-def scatter_refined_tets(
+def elastic_density_stats(
     active_tet_count: wp.array[wp.int32],
-    max_tets: wp.int32,
-    old_tet_indices: wp.array2d[wp.int32],
-    old_tet_stretch: wp.array[vec6],
-    old_tet_lambda: wp.array[vec6],
-    old_tet_materials: wp.array2d[wp.float32],
-    old_tet_poses: wp.array[wp.mat33],
-    tet_candidates: wp.array2d[wp.int32],
-    tet_candidate_ct: wp.array[wp.int32],
-    split_candidates: wp.array[wp.vec2i],
-    candidate_new_vertex_id: wp.array[wp.int32],
-    old_vertex_count: wp.array[wp.int32],
-    rest_particle_q: wp.array[wp.vec3],
-    new_tet_count: wp.array[wp.int32],
-    new_tet_indices: wp.array2d[wp.int32],
-    new_tet_stretch: wp.array[vec6],
-    new_tet_lambda: wp.array[vec6],
-    new_tet_materials: wp.array2d[wp.float32],
-    new_tet_poses: wp.array[wp.mat33],
+    tet_energy: wp.array[wp.float32],
+    tet_materials: wp.array2d[wp.float32],
+    tet_poses: wp.array[wp.mat33],
+    stats: wp.array[wp.float32],
 ):
-    """Atomic-append replacement for mesh_topology.scatter_tets. An unsplit
-    tet copies through to one freshly-claimed slot; a split tet claims two
-    consecutive slots and both children replace one endpoint of the winning
-    edge with the new vertex. Children inherit tet_stretch/tet_lambda
-    verbatim from the parent (exact given the rest-space-midpoint split, see
-    module docstring) and get a freshly computed tet_pose from
-    rest_particle_q. Output order is not deterministic across runs (which
-    physical slot a tet lands in depends on thread scheduling), but the set
-    of resulting tets/vertices is.
+    """stats[0] += sum of tet strain-energy density / mu, stats[1] += count."""
+    tid = wp.tid()
+    if tid >= active_tet_count[0]:
+        return
+    wp.atomic_add(stats, 0, tet_elastic_density(tet_energy, tet_materials, tet_poses, tid))
+    wp.atomic_add(stats, 1, wp.float32(1.0))
 
-    max_tets bounds-checks every claim: one accepted candidate edge can be
-    shared by many incident tets, all of which split when it does, so the
-    number of new tets created per pass is NOT simply bounded by K (the
-    number of accepted candidates) -- without this check, enough refine
-    passes could claim a slot past the buffer's end and silently corrupt
-    whatever GPU memory follows it. A tet whose winning candidate lost its
-    vertex claim to this same overflow (candidate_new_vertex_id[cid] == -1)
-    falls back to being copied through unsplit, rather than referencing a
-    vertex that was never actually created."""
+
+@wp.kernel
+def populate_candidates_geometric(
+    active_tet_count: wp.array[wp.int32],
+    tet_indices: wp.array2d[wp.int32],
+    tet_energy: wp.array[wp.float32],
+    tet_materials: wp.array2d[wp.float32],
+    tet_poses: wp.array[wp.mat33],
+    particle_inv_mass: wp.array[wp.float32],
+    particle_q: wp.array[wp.vec3],
+    particle_distance: wp.array[wp.float32],
+    particle_shape_id: wp.array[wp.int32],
+    shape_type: wp.array[wp.int32],
+    contact_d1: wp.float32,
+    min_edge_length: wp.float32,
+    elastic_weight: wp.float32,
+    vertex_contact_weight: wp.float32,
+    elastic_stats: wp.array[wp.float32],
+    candidate_hashmap_size: wp.int32,
+    candidate_hashmap_keys: wp.array[wp.uint64],
+    candidate_hashmap_scores: wp.array[wp.float32],
+):
     tid = wp.tid()
     if tid >= active_tet_count[0]:
         return
 
-    unsplit = tet_candidate_ct[tid] == 0
-    cid = wp.int32(-1)
-    new_vid = wp.int32(-1)
-    if not unsplit:
-        cid = tet_candidates[tid, 0]
-        claimed = candidate_new_vertex_id[cid]
-        if claimed < 0:
-            unsplit = True
-        else:
-            new_vid = claimed + old_vertex_count[0]
+    s_elastic = tet_elastic_density(tet_energy, tet_materials, tet_poses, tid)
+    if elastic_stats[1] > 0.0 and elastic_stats[0] > 0.0:
+        # Excess over the mesh-wide mean density: only hot spots score.
+        mean_density = elastic_stats[0] / elastic_stats[1]
+        s_elastic = wp.max(s_elastic / mean_density - 1.0, wp.float32(0.0))
 
-    if unsplit:
-        base = wp.atomic_add(new_tet_count, 0, 1)
-        if base >= max_tets:
-            return
-        copy_unsplit_tet(
-            tid, base,
-            old_tet_indices, old_tet_stretch, old_tet_lambda, old_tet_materials, old_tet_poses,
-            new_tet_indices, new_tet_stretch, new_tet_lambda, new_tet_materials, new_tet_poses,
-        )
+    l_max = wp.float32(0.0)
+    for i in range(4):
+        for j in range(i):
+            l_max = wp.max(l_max, wp.length(particle_q[tet_indices[tid, i]] - particle_q[tet_indices[tid, j]]))
+    l_max = wp.max(l_max, wp.float32(1.0e-20))
+
+    for i in range(4):
+        for j in range(i):
+            edge = wp.vec2i(tet_indices[tid, i], tet_indices[tid, j])
+            if not (particle_inv_mass[edge[0]] == 0.0 and particle_inv_mass[edge[1]] == 0.0):
+                # Every splittable edge is registered (score 0 if gated) so the
+                # later tri pass and the selection kernels can find its slot.
+                index, _is_new_key = hashtable_insert(
+                    candidate_hashmap_keys,
+                    candidate_hashmap_size,
+                    edge_to_key(edge),
+                    wp.uint64(0),
+                )
+                L = wp.length(particle_q[edge[1]] - particle_q[edge[0]])
+                if L >= 2.0 * min_edge_length:
+                    s_contact = wp.float32(0.0)
+                    for k in range(2):
+                        v = edge[k]
+                        sid = particle_shape_id[v]
+                        if sid >= 0:
+                            if shape_type[sid] == GeoType.CAPSULE:
+                                s_contact = wp.max(s_contact, contact_proximity(particle_distance[v], contact_d1))
+                    score = (L / min_edge_length) * (L / l_max) * (
+                        elastic_weight * s_elastic + vertex_contact_weight * s_contact
+                    )
+                    wp.atomic_max(candidate_hashmap_scores, index, score)
+
+
+@wp.kernel
+def populate_tri_candidates_geometric(
+    active_tri_count: wp.array[wp.int32],
+    tri_indices: wp.array2d[wp.int32],
+    particle_inv_mass: wp.array[wp.float32],
+    particle_q: wp.array[wp.vec3],
+    tri_distance: wp.array[wp.float32],
+    tri_bary: wp.array[wp.vec3],
+    contact_d1: wp.float32,
+    min_edge_length: wp.float32,
+    tri_contact_weight: wp.float32,
+    candidate_hashmap_size: wp.int32,
+    candidate_hashmap_keys: wp.array[wp.uint64],
+    candidate_hashmap_scores: wp.array[wp.float32],
+):
+    """Run after populate_candidates_geometric: raises the score of the edges
+    of every surface tri inside the contact barrier range, favouring the edge
+    nearest the tri's closest point to the tool."""
+    tid = wp.tid()
+    if tid >= active_tri_count[0]:
+        return
+    d = tri_distance[tid]
+    if d >= contact_d1:
+        return
+    prox = contact_proximity(d, contact_d1)
+    bary = tri_bary[tid]
+
+    l_max = wp.float32(1.0e-20)
+    for k in range(3):
+        i = k + 1
+        if i > 2:
+            i = i - 3
+        l_max = wp.max(l_max, wp.length(particle_q[tri_indices[tid, i]] - particle_q[tri_indices[tid, k]]))
+
+    for k in range(3):
+        # Edge opposite vertex k.
+        i = k + 1
+        if i > 2:
+            i = i - 3
+        j = k + 2
+        if j > 2:
+            j = j - 3
+        edge = wp.vec2i(tri_indices[tid, i], tri_indices[tid, j])
+        if not (particle_inv_mass[edge[0]] == 0.0 and particle_inv_mass[edge[1]] == 0.0):
+            L = wp.length(particle_q[edge[1]] - particle_q[edge[0]])
+            if L >= 2.0 * min_edge_length:
+                key = edge_to_key(edge)
+                index = hashtable_find(
+                    candidate_hashmap_keys,
+                    candidate_hashmap_size,
+                    key,
+                    wp.uint64(0),
+                )
+                if candidate_hashmap_keys[index] == key:
+                    # 1 when the closest point lies on this edge, 2/3 at the centroid.
+                    w = 1.0 - bary[k]
+                    score = (L / min_edge_length) * (L / l_max) * tri_contact_weight * prox * w
+                    wp.atomic_max(candidate_hashmap_scores, index, score)
+
+
+@wp.kernel
+def get_tet_candidate(
+    active_tet_count: wp.array[wp.int32],
+    threshold: wp.array[wp.float32],
+    tet_indices: wp.array2d[wp.int32],
+    candidate_hashmap_size: wp.int32,
+    candidate_hashmap_keys: wp.array[wp.uint64],
+    candidate_hashmap_scores: wp.array[wp.float32],
+    candidate_hashmap_flag: wp.array[wp.uint8],
+    tet_candidate: wp.array[wp.vec2i],
+):
+    tid = wp.tid()
+    if tid >= active_tet_count[0]:
+        return
+    
+    high_score = threshold[0]
+    high_score_edge = wp.vec2i(-1, -1)
+    high_score_index = wp.int32(0)
+
+
+    for i in range(4):
+        for j in range(i):
+            edge = wp.vec2i(tet_indices[tid, i], tet_indices[tid, j])
+            key = edge_to_key(edge)
+
+            index =  hashtable_find(
+                candidate_hashmap_keys,
+                candidate_hashmap_size,
+                key,
+                wp.uint64(0)
+            )
+
+
+            if candidate_hashmap_keys[index] == key and candidate_hashmap_scores[index] > high_score:
+                high_score = candidate_hashmap_scores[index]
+                high_score_edge = edge
+                high_score_index = index
+
+    if high_score > threshold[0]:
+        candidate_hashmap_flag[high_score_index] = CANDIDATE_PENDING
+    tet_candidate[tid] = high_score_edge
+
+@wp.kernel
+def remove_conflicting_candidates(
+    active_tet_count: wp.array[wp.int32],
+    tet_indices: wp.array2d[wp.int32],
+    tet_candidate: wp.array[wp.vec2i],
+    candidate_hashmap_size: wp.int32,
+    candidate_hashmap_keys: wp.array[wp.uint64],
+    candidate_hashmap_scores: wp.array[wp.float32],
+    candidate_hashmap_flag: wp.array[wp.uint8],
+):
+    tid = wp.tid()
+    if tid >= active_tet_count[0] or tet_candidate[tid][0] == -1:
+        return
+    
+    tet_candidate_key = edge_to_key(tet_candidate[tid])
+    candidate_index = hashtable_find(
+        candidate_hashmap_keys,
+        candidate_hashmap_size,
+        tet_candidate_key,
+        wp.uint64(0),
+    )
+
+
+    for i in range(4):
+        for j in range(i):
+
+            edge = wp.vec2i(tet_indices[tid, i], tet_indices[tid, j])
+            edge_key = edge_to_key(edge)
+
+            if edge_key != tet_candidate_key:
+                index = hashtable_find(
+                    candidate_hashmap_keys,
+                    candidate_hashmap_size,
+                    edge_key,
+                    wp.uint64(0),
+                )
+
+                # Send this candidate back to being available
+                if candidate_hashmap_flag[index] == CANDIDATE_PENDING:
+                    candidate_hashmap_flag[index] = CANDIDATE_AVAILABLE
+
+
+
+@wp.kernel
+def finalize_nonconflicting_candidates(
+    active_tet_count: wp.array[wp.int32],
+    tet_indices: wp.array2d[wp.int32],
+    tet_candidate: wp.array[wp.vec2i],
+    candidate_hashmap_size: wp.int32,
+    candidate_hashmap_keys: wp.array[wp.uint64],
+    candidate_hashmap_scores: wp.array[wp.float32],
+    candidate_hashmap_flag: wp.array[wp.uint8],
+):
+    tid = wp.tid()
+    if tid >= active_tet_count[0]:
+        return
+    
+    candidate = tet_candidate[tid]
+    # We have already established there are no viable edge splits for this tetrahedron
+    if candidate[0] == -1:
+        return
+    candidate_key = edge_to_key(candidate)
+
+    candidate_index = hashtable_find(
+        candidate_hashmap_keys,
+        candidate_hashmap_size,
+        candidate_key,
+        wp.uint64(0),
+    )
+    
+
+    if candidate_hashmap_flag[candidate_index] != CANDIDATE_PENDING and candidate_hashmap_flag[candidate_index] != CANDIDATE_SELECTED:
+        return
+    
+    candidate_hashmap_flag[candidate_index] = CANDIDATE_SELECTED
+
+    # We have found a candidate that can be finalized so lets set all the other edges on the tet so that they cannot be claimed by any other tetrahedra
+    for i in range(4):
+        for j in range(i):
+            edge = wp.vec2i(tet_indices[tid, i], tet_indices[tid, j])
+            edge_key = edge_to_key(edge)
+
+            if edge_key != candidate_key:
+
+                index = hashtable_find(
+                    candidate_hashmap_keys,
+                    candidate_hashmap_size,
+                    edge_key,
+                    wp.uint64(0),
+                )
+
+                candidate_hashmap_flag[index] = CANDIDATE_UNAVAILABLE
+
+
+
+
+@wp.kernel
+def udpate_tet_candidate(
+    active_tet_count: wp.array[wp.int32],
+    threshold: wp.array[wp.float32],
+    tet_indices: wp.array2d[wp.int32],
+    tet_candidate: wp.array[wp.vec2i],
+    candidate_hashmap_size: wp.int32,
+    candidate_hashmap_keys: wp.array[wp.uint64],
+    candidate_hashmap_scores: wp.array[wp.float32],
+    candidate_hashmap_flag: wp.array[wp.uint8],
+):
+    tid = wp.tid()
+    if tid >= active_tet_count[0] and tet_candidate[tid][0] != -1:
+        return
+    
+    high_score = threshold[0]
+    high_score_edge = wp.vec2i(-1, -1)
+    high_score_index = wp.int32(0)
+
+    for i in range(4):
+        for j in range(i):
+            edge = wp.vec2i(tet_indices[tid, i], tet_indices[tid, j])
+            edge_key = edge_to_key(edge)
+
+            index = hashtable_find(
+                candidate_hashmap_keys,
+                candidate_hashmap_size,
+                edge_key,
+                wp.uint64(0)
+            )
+
+            # Select the highest scored available candidate or if there is a selected candidate incident select that one
+            if candidate_hashmap_keys[index] == edge_key and ((candidate_hashmap_scores[index] > high_score and candidate_hashmap_flag[index] != CANDIDATE_UNAVAILABLE) or candidate_hashmap_flag[index] == CANDIDATE_SELECTED):
+                high_score_edge = edge
+                high_score = candidate_hashmap_scores[index]
+                high_score_index = index
+
+    if high_score > threshold[0] and candidate_hashmap_flag[high_score_index] != CANDIDATE_SELECTED:
+        candidate_hashmap_flag[high_score_index] = CANDIDATE_PENDING
+    tet_candidate[tid] = high_score_edge
+
+
+@wp.kernel
+def invalidate_failed_candidates(
+    active_tet_count: wp.array[wp.int32],
+    tet_candidate: wp.array[wp.vec2i],
+    candidate_hashtable_size: wp.int32,
+    candidate_hashtable_keys: wp.array[wp.uint64],
+    candidate_hashtable_scores: wp.array[wp.float32],
+    candidate_hashtable_flag: wp.array[wp.uint8],
+):
+    tid = wp.tid()
+    if tid >= active_tet_count[0]:
         return
 
-    split_edge = split_candidates[cid]
-    base = wp.atomic_add(new_tet_count, 0, 2)
+    candidate = tet_candidate[tid]
 
-    # Each of the 2 claimed slots is checked independently, not
-    # all-or-nothing: atomic_add's claimed ranges gaplessly tile
-    # [0, new_tet_count_final), so if a range straddles max_tets (its first
-    # slot in bounds, second one not), the in-bounds slot is still owed a
-    # write -- every valid index that gets claimed by *any* thread must end
-    # up written, or a later kernel iterating up to the (clamped)
-    # active_tet_count would read a slot nothing ever populated. The
-    # straddling tet's un-writable sibling is simply dropped (loses that one
-    # tet, not memory safety) -- the same "drop on overflow" philosophy this
-    # codebase already uses for padded-topology BSR row capacity.
-    for j in range(2):
-        slot = base + j
-        if slot >= max_tets:
-            continue
+    if candidate[0] == -1:
+        return
+
+    candidate_key = edge_to_key(candidate)
+
+    index = hashtable_find(
+        candidate_hashtable_keys,
+        candidate_hashtable_size,
+        candidate_key,
+        wp.uint64(0),
+    )
+
+    if candidate_hashtable_flag[index] != CANDIDATE_SELECTED:
+        tet_candidate[tid] = wp.vec2i(-1, -1)
+    
+
+# @wp.kernel
+# def threshold_candidates(
+#     active_tet_count: wp.array[wp.int32],
+#     tet_candidate: wp.array[wp.vec2i],
+#     candidate_hashmap_size: wp.int32,
+#     candidate_hashmap_keys: wp.array[wp.uint64],
+#     candidate_hashmap_scores: wp.array[wp.float32],
+#     threshold: wp.array[wp.float32],
+# ):
+#     tid = wp.tid()
+#     if tid > active_tet_count[0]:
+#         return
+    
+#     candidate = tet_candidate[tid]
+#     candidate_key = edge_to_key(candidate)
+
+#     index = hashtable_find(
+#         candidate_hashmap_keys,
+#         candidate_hashmap_size,
+#         edge_to_key(candidate),
+#         wp.uint64(0),
+#     )
+
+#     if candidate_hashmap_scores[index] < threshold[0]:
+#         tet_candidate[tid] = wp.vec2i(-1, -1)
+
+#     pass
+
+    
+
+@wp.kernel
+def gate_refine_pass(
+    pass_counter: wp.array[wp.int32],
+    refine_every: wp.int32,
+    tet_candidate: wp.array[wp.vec2i],
+):
+    """Clear every candidate unless this is a refining pass (counter % every == 0)."""
+    tid = wp.tid()
+    if refine_every > 1:
+        if pass_counter[0] % refine_every != 0:
+            tet_candidate[tid] = wp.vec2i(-1, -1)
+
+
+@wp.kernel
+def advance_pass_counter(pass_counter: wp.array[wp.int32]):
+    pass_counter[0] = pass_counter[0] + 1
+
+
+@wp.kernel
+def check_split_capacity(
+    tet_index_map: wp.array[wp.int32],
+    new_vertex_index_map: wp.array[wp.int32],
+    old_active_particle_count: wp.array[wp.int32],
+    max_tets: wp.int32,
+    max_vertices: wp.int32,
+    overflow: wp.array[wp.int32],
+):
+    """After the exclusive scans the last entries hold the pass's new tet
+    total and new-vertex count; flag the pass if either exceeds capacity."""
+    n_tets = tet_index_map[tet_index_map.shape[0] - 1]
+    n_new_vertices = new_vertex_index_map[new_vertex_index_map.shape[0] - 1]
+    if n_tets > max_tets or old_active_particle_count[0] + n_new_vertices > max_vertices:
+        overflow[0] = 1
+    else:
+        overflow[0] = 0
+
+
+@wp.kernel
+def drop_candidates_on_overflow(
+    overflow: wp.array[wp.int32],
+    tet_candidate: wp.array[wp.vec2i],
+):
+    tid = wp.tid()
+    if overflow[0] != 0:
+        tet_candidate[tid] = wp.vec2i(-1, -1)
+
+
+@wp.kernel
+def populate_chosen_candidates(
+    active_tet_count: wp.array[wp.int32],
+    tet_candidate: wp.array[wp.vec2i],
+    candidate_hashtable_size: wp.int32,
+    candidate_hashtable_keys: wp.array[wp.uint64],
+    tet_split_counts: wp.array[wp.int32],
+    new_vertex_predicate: wp.array[wp.int32],
+):
+    tid = wp.tid()
+    if tid >= active_tet_count[0]:
+        return
+
+    candidate = tet_candidate[tid]
+
+    if candidate[0] == -1:
+        tet_split_counts[tid] = 1
+        new_vertex_predicate[tid] = 0
+        return
+
+    tet_split_counts[tid] = 2
+
+    _index, is_new = hashtable_insert(
+        candidate_hashtable_keys,
+        candidate_hashtable_size,
+        edge_to_key(candidate),
+        wp.uint64(0)
+    )
+
+    if is_new:
+        new_vertex_predicate[tid] = 1
+    else:
+        new_vertex_predicate[tid] = 0
+
+@wp.kernel
+def validate_candidate_selection(
+    active_tet_count: wp.array[wp.int32],
+    tet_indices: wp.array2d[wp.int32],
+    candidate_hashtable_size: wp.int32,
+    candidate_hashtable_keys: wp.array[wp.uint64],
+    is_valid: wp.array[wp.int32],
+):
+    tid = wp.tid()
+    if tid >= active_tet_count[0]:
+        return
+    count = wp.int32(0)
+
+    for i in range(4):
+        for j in range(i):
+            edge = wp.vec2i(tet_indices[tid, i], tet_indices[tid, j])
+            key = edge_to_key(edge)
+
+            index = hashtable_find(
+                candidate_hashtable_keys,
+                candidate_hashtable_size,
+                key,
+                wp.uint64(0),
+            )
+
+            if candidate_hashtable_keys[index] == key:
+                count += 1
+
+    is_valid[tid] = wp.int32(count <= 1)
+
+@wp.kernel
+def make_candidate_new_vertex_mapping(
+    active_tet_count: wp.array[wp.int32],
+    active_particle_count: wp.array[wp.int32],
+    tet_candidate: wp.array[wp.vec2i],
+    new_vertex_index_map: wp.array[wp.int32],
+    candidate_hashmap_size: wp.int32,
+    candidate_hashmap_keys: wp.array[wp.uint64],
+    canidate_hashmap_new_vertex: wp.array[wp.int32],  
+):
+    tid = wp.tid()
+    if tid >= active_tet_count[0]:
+        return
+
+    if new_vertex_index_map[tid] < new_vertex_index_map[tid + 1]:
+        candidate_key = edge_to_key(tet_candidate[tid])
+
+        index = hashtable_find(
+            candidate_hashmap_keys,
+            candidate_hashmap_size,
+            candidate_key,
+            wp.uint64(0),
+        )
+
+        canidate_hashmap_new_vertex[index] = new_vertex_index_map[tid] + active_particle_count[0]
+
+@wp.kernel
+def claim_new_vertices(
+    candidate_hashmap_size: wp.int32,
+    candidate_hashmap_keys: wp.array[wp.uint64],
+    candidate_hashmap_new_vertex: wp.array[wp.int32],
+    old_active_tet_count: wp.array[wp.int32],
+    tet_candidate: wp.array[wp.vec2i],
+    new_vertex_index_map: wp.array[wp.int32],
+    split_t: wp.float32,
+    new_particle_q: wp.array[wp.vec3],
+    new_particle_qd: wp.array[wp.vec3],
+    new_rest_particle_q: wp.array[wp.vec3],
+):
+    tid = wp.tid()
+    if tid >= old_active_tet_count[0]:
+        return
+
+    # Since this comes from an exclusive prefix scan if the next index is higher that means we should insert a vertex from this tet.
+    if new_vertex_index_map[tid] >= new_vertex_index_map[tid + 1]:
+        return
+
+    candidate = tet_candidate[tid]
+    candidate_key = edge_to_key(candidate)
+    index = hashtable_find(
+        candidate_hashmap_keys,
+        candidate_hashmap_size,
+        candidate_key,
+        wp.uint64(0)
+    )
+    new_vertex_index = candidate_hashmap_new_vertex[index]
+
+    new_particle_q[new_vertex_index] = new_particle_q[candidate[0]] + (new_particle_q[candidate[1]] - new_particle_q[candidate[0]]) * split_t
+    new_particle_qd[new_vertex_index] = new_particle_qd[candidate[0]] + (new_particle_qd[candidate[1]] - new_particle_qd[candidate[0]]) * split_t
+    new_rest_particle_q[new_vertex_index] = new_rest_particle_q[candidate[0]] + (new_rest_particle_q[candidate[1]] - new_rest_particle_q[candidate[0]]) * split_t
+
+
+@wp.kernel
+def scatter_tets(
+    candidate_hashmap_size: wp.int32,
+    candidate_hashmap_keys: wp.array[wp.uint64],
+    candidate_hashmap_new_vertex: wp.array[wp.int32],
+    old_active_tet_count: wp.array[wp.int32],
+    old_tet_indices: wp.array2d[wp.int32],
+    old_tet_stretch: wp.array[vec6],
+    old_tet_poses: wp.array[wp.mat33],
+    old_tet_lambda: wp.array[vec6],
+    old_tet_materials: wp.array2d[wp.float32],
+    tet_candidate: wp.array[wp.vec2i],
+    tet_index_map: wp.array[wp.int32],
+    density: wp.float32,
+    new_rest_particle_q: wp.array[wp.vec3],
+    new_particle_mass: wp.array[wp.float32],
+    new_tet_indices: wp.array2d[wp.int32],
+    new_tet_stretch: wp.array[vec6],
+    new_tet_poses: wp.array[wp.mat33],
+    new_tet_lambda: wp.array[vec6],
+    new_tet_materials: wp.array2d[wp.float32],
+):
+    tid = wp.tid()
+    if tid >= old_active_tet_count[0]:
+        return
+
+    if tet_index_map[tid] + 1 >= tet_index_map[tid + 1]:
+        new_tet_indices[tet_index_map[tid], 0] = old_tet_indices[tid, 0]
+        new_tet_indices[tet_index_map[tid], 1] = old_tet_indices[tid, 1]
+        new_tet_indices[tet_index_map[tid], 2] = old_tet_indices[tid, 2]
+        new_tet_indices[tet_index_map[tid], 3] = old_tet_indices[tid, 3]
+
+        new_tet_stretch[tet_index_map[tid]] = old_tet_stretch[tid]
+        new_tet_poses[tet_index_map[tid]] = old_tet_poses[tid]
+        new_tet_lambda[tet_index_map[tid]] = old_tet_lambda[tid]
+        new_tet_materials[tet_index_map[tid], 0] = old_tet_materials[tid, 0]
+        new_tet_materials[tet_index_map[tid], 1] = old_tet_materials[tid, 1]
+        new_tet_materials[tet_index_map[tid], 2] = old_tet_materials[tid, 2]
+
+        tet_mass = density / (6.0 * wp.determinant(old_tet_poses[tid]))
 
         for i in range(4):
-            if old_tet_indices[tid, i] == split_edge[j]:
-                new_tet_indices[slot, i] = new_vid
-            else:
-                new_tet_indices[slot, i] = old_tet_indices[tid, i]
+            new_particle_mass[old_tet_indices[tid, i]] += tet_mass / 4.0
 
-        new_tet_stretch[slot] = old_tet_stretch[tid]
-        new_tet_lambda[slot] = old_tet_lambda[tid]
-        for k in range(3):
-            new_tet_materials[slot, k] = old_tet_materials[tid, k]
+        return
 
-        r0 = rest_particle_q[new_tet_indices[slot, 0]]
-        r1 = rest_particle_q[new_tet_indices[slot, 1]]
-        r2 = rest_particle_q[new_tet_indices[slot, 2]]
-        r3 = rest_particle_q[new_tet_indices[slot, 3]]
-        Dm = wp.matrix_from_cols(r1 - r0, r2 - r0, r3 - r0)
-        new_tet_poses[slot] = wp.inverse(Dm)
+
+
+    candidate = tet_candidate[tid]
+    candidate_key = edge_to_key(candidate)
+    index = hashtable_find(
+        candidate_hashmap_keys,
+        candidate_hashmap_size,
+        candidate_key,
+        wp.uint64(0)
+    )
+    new_vertex_index = candidate_hashmap_new_vertex[index]
+
+    split_edge_index = wp.vec2i(0, 0)
+    for i in range(4):
+        for j in range(i):
+            edge_key = edge_to_key(wp.vec2i(old_tet_indices[tid, i], old_tet_indices[tid, j]))
+
+            if edge_key == candidate_key:
+                split_edge_index = wp.vec2i(i, j)
+    
+    for i in range(2):
+        new_tet_indices[tet_index_map[tid] + i, 0] = old_tet_indices[tid, 0]
+        new_tet_indices[tet_index_map[tid] + i, 1] = old_tet_indices[tid, 1]
+        new_tet_indices[tet_index_map[tid] + i, 2] = old_tet_indices[tid, 2]
+        new_tet_indices[tet_index_map[tid] + i, 3] = old_tet_indices[tid, 3]
+        new_tet_indices[tet_index_map[tid] + i, split_edge_index[i]] = new_vertex_index
+
+        t0 = new_rest_particle_q[new_tet_indices[tet_index_map[tid] + i,  0]]
+        t1 = new_rest_particle_q[new_tet_indices[tet_index_map[tid] + i,  1]]
+        t2 = new_rest_particle_q[new_tet_indices[tet_index_map[tid] + i,  2]]
+        t3 = new_rest_particle_q[new_tet_indices[tet_index_map[tid] + i,  3]]
+        D_m = wp.matrix_from_cols(t1 - t0, t2 - t0, t3 - t0)
+        volume = wp.determinant(D_m) / 6.0
+        tet_mass = volume * density
+
+        for j in range(4):
+            new_particle_mass[new_tet_indices[tet_index_map[tid] + i, j]] += tet_mass / 4.0
+
+        new_tet_poses[tet_index_map[tid] + i] = wp.inverse(D_m)
+
+        new_tet_stretch[tet_index_map[tid] + i] = old_tet_stretch[tid]
+        new_tet_lambda[tet_index_map[tid] + i] = old_tet_lambda[tid]
+        new_tet_materials[tet_index_map[tid] + i, 0] = old_tet_materials[tid, 0]
+        new_tet_materials[tet_index_map[tid] + i, 1] = old_tet_materials[tid, 1]
+        new_tet_materials[tet_index_map[tid] + i, 2] = old_tet_materials[tid, 2]
+
 
 
 @wp.kernel
-def finalize_active_counts(
-    old_particle_count: wp.array[wp.int32],
-    max_tets: wp.int32,
-    max_particles: wp.int32,
-    new_tet_count: wp.array[wp.int32],
-    new_vertex_count: wp.array[wp.int32],
-    active_tet_count_out: wp.array[wp.int32],
-    active_particle_count_out: wp.array[wp.int32],
+def get_tri_candidate(
+    active_tri_count: wp.array[wp.int32],
+    tri_indices: wp.array2d[wp.int32],
+    candidate_hashmap_size: wp.int32,
+    candidate_hashmap_keys: wp.array[wp.uint64],
+    tri_candidate: wp.array[wp.vec2i],
+    tri_split_counts: wp.array[wp.int32],
 ):
-    # new_tet_count/new_vertex_count are raw atomic-add totals and can
-    # overshoot the buffer ceiling (claims past it are refused by
-    # scatter_refined_tets/claim_new_vertices, but the counters themselves
-    # aren't bounds-aware) -- clamp here so active_tet_count/
-    # active_particle_count never exceed what's actually allocated, which
-    # every other kernel in this solver trusts as an invariant.
-    active_tet_count_out[0] = wp.min(new_tet_count[0], max_tets)
-    active_particle_count_out[0] = wp.min(old_particle_count[0] + new_vertex_count[0], max_particles)
-
-
-@wp.kernel
-def interpolate_new_particle_mass(
-    split_candidates: wp.array[wp.vec2i],
-    split_hashmap_keys: wp.array[wp.uint64],
-    split_hashmap_size: wp.int32,
-    candidate_new_vertex_id: wp.array[wp.int32],
-    old_vertex_count: wp.array[wp.int32],
-    particle_mass: wp.array[wp.float32],
-    particle_inv_mass: wp.array[wp.float32],
-):
-    """New vertices start with no representation in model.particle_mass at
-    all (it's built once, at model-finalize time, from the original mesh) --
-    without this, the global system would be singular for their 3 DOFs. Not
-    exactly mass-conserving (a small amount of mass is added per split); an
-    accepted simplification for a research prototype."""
+    """Per active surface tri, find whether one of its 3 edges was finalized
+    as a split edge this refine pass (candidate_hashmap_keys has already been
+    rebuilt by populate_chosen_candidates to contain only those edges), and
+    set the 1/2 split count the same way populate_chosen_candidates does for
+    tets."""
     tid = wp.tid()
-    edge = split_candidates[tid]
-    if edge[0] < 0:
-        return
-    if not hashset_find_edge(split_hashmap_keys, split_hashmap_size, edge):
-        return
-    claimed = candidate_new_vertex_id[tid]
-    if claimed < 0:
-        # Claim failed in claim_new_vertices (max_particles exhausted) --
-        # skip, or this would write mass into old_vertex_count[0] - 1, i.e.
-        # corrupt the last legitimately-existing particle.
+    if tid >= active_tri_count[0]:
         return
 
-    new_idx = old_vertex_count[0] + claimed
-    mass = 0.5 * (particle_mass[edge[0]] + particle_mass[edge[1]])
-    particle_mass[new_idx] = mass
-    if mass > 0.0:
-        particle_inv_mass[new_idx] = 1.0 / mass
+    found_edge = wp.vec2i(-1, -1)
+    for i in range(3):
+        for j in range(i):
+            edge = wp.vec2i(tri_indices[tid, i], tri_indices[tid, j])
+            key = edge_to_key(edge)
+
+            index = hashtable_find(
+                candidate_hashmap_keys,
+                candidate_hashmap_size,
+                key,
+                wp.uint64(0),
+            )
+
+            if candidate_hashmap_keys[index] == key:
+                found_edge = edge
+
+    tri_candidate[tid] = found_edge
+    if found_edge[0] == -1:
+        tri_split_counts[tid] = 1
     else:
-        particle_inv_mass[new_idx] = 0.0
+        tri_split_counts[tid] = 2
 
 
 @wp.kernel
-def compute_should_refine(
-    step_counter: wp.array[wp.int32],
-    period: wp.int32,
-    should_refine: wp.array[wp.int32],
+def scatter_tris(
+    candidate_hashmap_size: wp.int32,
+    candidate_hashmap_keys: wp.array[wp.uint64],
+    candidate_hashmap_new_vertex: wp.array[wp.int32],
+    old_active_tri_count: wp.array[wp.int32],
+    old_tri_indices: wp.array2d[wp.int32],
+    tri_candidate: wp.array[wp.vec2i],
+    tri_index_map: wp.array[wp.int32],
+    new_tri_indices: wp.array2d[wp.int32],
 ):
-    should_refine[0] = wp.where(step_counter[0] % period == 0, 1, 0)
+    tid = wp.tid()
+    if tid >= old_active_tri_count[0]:
+        return
 
+    if tri_index_map[tid] + 1 >= tri_index_map[tid + 1]:
+        new_tri_indices[tri_index_map[tid], 0] = old_tri_indices[tid, 0]
+        new_tri_indices[tri_index_map[tid], 1] = old_tri_indices[tid, 1]
+        new_tri_indices[tri_index_map[tid], 2] = old_tri_indices[tid, 2]
+        return
 
-@wp.kernel
-def increment_step_counter(step_counter: wp.array[wp.int32]):
-    step_counter[0] += 1
+    candidate = tri_candidate[tid]
+    candidate_key = edge_to_key(candidate)
+    index = hashtable_find(
+        candidate_hashmap_keys,
+        candidate_hashmap_size,
+        candidate_key,
+        wp.uint64(0)
+    )
+    new_vertex_index = candidate_hashmap_new_vertex[index]
 
+    split_edge_index = wp.vec2i(0, 0)
+    for i in range(3):
+        for j in range(i):
+            edge_key = edge_to_key(wp.vec2i(old_tri_indices[tid, i], old_tri_indices[tid, j]))
 
-class RefinementBuffers:
-    """Fixed-capacity scratch state for refine(), allocated once."""
+            if edge_key == candidate_key:
+                split_edge_index = wp.vec2i(i, j)
 
-    def __init__(self, max_tets: int, max_new_vertices_per_refine: int):
-        self.max_tets = max_tets
-        self.max_candidates = 6 * max_tets
-        self.k = max_new_vertices_per_refine
-
-        # radix_sort_pairs requires keys/values storage >= 2*count.
-        self.candidate_edges = wp.empty(self.max_candidates, dtype=wp.vec2i)
-        self.candidate_scores = wp.empty(2 * self.max_candidates, dtype=wp.float32)
-        self.candidate_order = wp.empty(2 * self.max_candidates, dtype=wp.int32)
-        self.candidate_order_iota = wp.array(np.arange(self.max_candidates, dtype=np.int32))
-
-        self.split_candidates = wp.empty(self.k, dtype=wp.vec2i)
-        self.split_scores = wp.empty(self.k, dtype=wp.float32)
-
-        self.split_hashmap_size = get_hashtable_size(self.k, 0.5)
-        self.split_hashmap_keys = wp.empty(self.split_hashmap_size, dtype=wp.uint64)
-        self.split_hashmap_values = wp.empty(self.split_hashmap_size, dtype=wp.int32)
-
-        self.tet_candidates = wp.empty((max_tets, 6), dtype=wp.int32)
-        self.tet_candidate_ct = wp.zeros(max_tets, dtype=wp.int32)
-
-        self.candidate_new_vertex_id = wp.empty(self.k, dtype=wp.int32)
-
-        self.new_tet_count = wp.zeros(1, dtype=wp.int32)
-        self.new_vertex_count = wp.zeros(1, dtype=wp.int32)
-
-        self.step_counter = wp.zeros(1, dtype=wp.int32)
-        self.should_refine = wp.zeros(1, dtype=wp.int32)
-
-
-def copy_additional_state(dst: AdditionalState, src: AdditionalState) -> None:
-    """Device-side (capture-safe) copy of every field, src -> dst. Called by
-    RefinementSolver.step() at the end of every step to bring
-    additional_state_0 up to date with additional_state_1's final content,
-    in place of a Python reference swap -- see the module docstring for why
-    a swap doesn't survive CUDA graph replay here."""
-    wp.copy(dst.tet_indices, src.tet_indices)
-    wp.copy(dst.tet_stretch, src.tet_stretch)
-    wp.copy(dst.tet_lambda, src.tet_lambda)
-    wp.copy(dst.tet_materials, src.tet_materials)
-    wp.copy(dst.tet_poses, src.tet_poses)
-    wp.copy(dst.active_tet_count, src.active_tet_count)
-    wp.copy(dst.active_particle_count, src.active_particle_count)
-    wp.copy(dst.rest_particle_q, src.rest_particle_q)
+    for i in range(2):
+        new_tri_indices[tri_index_map[tid] + i, 0] = old_tri_indices[tid, 0]
+        new_tri_indices[tri_index_map[tid] + i, 1] = old_tri_indices[tid, 1]
+        new_tri_indices[tri_index_map[tid] + i, 2] = old_tri_indices[tid, 2]
+        new_tri_indices[tri_index_map[tid] + i, split_edge_index[i]] = new_vertex_index
 
 
 def refine(
-    solver,
-    additional_state_0: AdditionalState,
-    additional_state_1: AdditionalState,
+    model: Model,
+    density: float,
+    state_in: State,
     state_out: State,
-    min_refine_score: float,
-) -> None:
+    additional_state_in: AdditionalState,
+    additional_state_out: AdditionalState,
+    refinement_buffers: RefinementBuffers,
+    tet_scores: wp.array[wp.float32],
+    vertex_scores: wp.array[wp.float32],
+    tet_score_weight: float = DEFAULT_TET_SCORE_WEIGHT,
+    vertex_score_weight: float = DEFAULT_VERTEX_SCORE_WEIGHT,
+    penetrating_edge_score: float = DEFAULT_PENETRATING_EDGE_SCORE,
+    conflict_iterations: int = DEFAULT_CONFLICT_ITERATIONS,
+    split_position: float = DEFAULT_SPLIT_POSITION,
+    scoring: str = "legacy",
+    particle_distance: wp.array | None = None,
+    particle_shape_id: wp.array | None = None,
+    tri_distance: wp.array | None = None,
+    tri_bary: wp.array | None = None,
+    contact_d1: float = 0.0,
+    min_edge_length: float = 0.0,
+    elastic_weight: float = 1.0,
+    vertex_contact_weight: float = 1.0,
+    tri_contact_weight: float = 1.0,
+    refine_every: int = 1,
+):
+    """Split edges of ``additional_state_in`` into ``additional_state_out``.
 
-    buffers: RefinementBuffers = solver._refine_buffers
-    max_tets = buffers.max_tets
+    ``refine_every``: only every N-th call actually splits (the others still
+    forward the topology unchanged); counted on the device so it survives
+    CUDA-graph capture.
 
-    # Vertex-indexed and append-only (never reassigned to a new slot the way
-    # tet-indexed fields can be), so this is always carried forward in full
-    # regardless of whether a real refine pass triggers this step.
-    wp.copy(additional_state_1.rest_particle_q, additional_state_0.rest_particle_q)
+    ``scoring`` selects how candidate edges are scored:
+
+    * ``"legacy"`` -- energy-weighted sum over incident tets plus the
+      midpoint-penetration override (``tet_score_weight`` /
+      ``vertex_score_weight`` / ``penetrating_edge_score``).
+    * ``"geometric"`` -- dimensionless per-edge score from edge length,
+      longest-edge ratio, elastic energy density and contact proximity; see
+      populate_candidates_geometric. Needs ``particle_distance`` /
+      ``particle_shape_id`` (Contact.distance / Contact.shape_id) and, for the
+      tri term, ``tri_distance`` / ``tri_bary``, all evaluated at
+      ``state_in``; ``contact_d1`` is the barrier range and
+      ``min_edge_length`` the shortest edge the refinement may create.
+    """
+
+    refinement_buffers.candidate_hashmap_keys.zero_()
+    refinement_buffers.candidate_hashmap_scores.zero_()
+    refinement_buffers.candidate_hashmap_flag.zero_()
+    # Add candidates to hashmap
+    
+
+    if scoring == "legacy":
+        wp.launch(
+            populate_candidates,
+            dim=refinement_buffers.max_tets,
+            inputs=[
+                additional_state_in.active_tet_count,
+                additional_state_in.tet_indices,
+                tet_scores,
+                vertex_scores,
+                model.particle_inv_mass,
+                state_in.particle_q,
+                model.shape_transform,
+                model.shape_type,
+                model.shape_scale,
+                model.shape_body,
+                model.shape_count,
+                state_in.body_q,
+                tet_score_weight,
+                vertex_score_weight,
+                penetrating_edge_score,
+                refinement_buffers.candidate_hashmap_size,
+            ],
+            outputs=[
+                refinement_buffers.candidate_hashmap_keys,
+                refinement_buffers.candidate_hashmap_scores,
+            ]
+        )
+    elif scoring == "geometric":
+        if particle_distance is None or particle_shape_id is None:
+            raise ValueError("scoring='geometric' needs particle_distance and particle_shape_id")
+        if min_edge_length <= 0.0 or contact_d1 <= 0.0:
+            raise ValueError("scoring='geometric' needs min_edge_length > 0 and contact_d1 > 0")
+        refinement_buffers.elastic_density_stats.zero_()
+        wp.launch(
+            elastic_density_stats,
+            dim=refinement_buffers.max_tets,
+            inputs=[
+                additional_state_in.active_tet_count,
+                tet_scores,
+                additional_state_in.tet_materials,
+                additional_state_in.tet_poses,
+            ],
+            outputs=[refinement_buffers.elastic_density_stats],
+        )
+        wp.launch(
+            populate_candidates_geometric,
+            dim=refinement_buffers.max_tets,
+            inputs=[
+                additional_state_in.active_tet_count,
+                additional_state_in.tet_indices,
+                tet_scores,
+                additional_state_in.tet_materials,
+                additional_state_in.tet_poses,
+                model.particle_inv_mass,
+                state_in.particle_q,
+                particle_distance,
+                particle_shape_id,
+                model.shape_type,
+                float(contact_d1),
+                float(min_edge_length),
+                float(elastic_weight),
+                float(vertex_contact_weight),
+                refinement_buffers.elastic_density_stats,
+                refinement_buffers.candidate_hashmap_size,
+            ],
+            outputs=[
+                refinement_buffers.candidate_hashmap_keys,
+                refinement_buffers.candidate_hashmap_scores,
+            ],
+        )
+        if tri_distance is not None and tri_bary is not None:
+            wp.launch(
+                populate_tri_candidates_geometric,
+                dim=refinement_buffers.max_tris,
+                inputs=[
+                    additional_state_in.active_tri_count,
+                    additional_state_in.tri_indices,
+                    model.particle_inv_mass,
+                    state_in.particle_q,
+                    tri_distance,
+                    tri_bary,
+                    float(contact_d1),
+                    float(min_edge_length),
+                    float(tri_contact_weight),
+                    refinement_buffers.candidate_hashmap_size,
+                ],
+                outputs=[
+                    refinement_buffers.candidate_hashmap_keys,
+                    refinement_buffers.candidate_hashmap_scores,
+                ],
+            )
+    else:
+        raise ValueError(f"Unknown refinement scoring {scoring!r} (expected 'legacy' or 'geometric')")
 
     wp.launch(
-        compute_should_refine,
-        dim=1,
-        inputs=[buffers.step_counter, solver.refine_every_n_steps],
-        outputs=[buffers.should_refine],
-    )
-    wp.launch(increment_step_counter, dim=1, inputs=[], outputs=[buffers.step_counter])
-
-    wp.launch(
-        emit_split_edge_candidates,
-        dim=max_tets,
+        get_tet_candidate,
+        dim=refinement_buffers.max_tets,
         inputs=[
-            additional_state_0.active_tet_count,
-            additional_state_0.tet_indices,
-            # additional_state_0's tet slots line up with solver._elastic_energy
-            # because copy_additional_state() (end of the previous step) copies
-            # additional_state_1's content into additional_state_0 slot-for-slot,
-            # and solver._elastic_energy was last written against
-            # additional_state_1 at that same slot during that step's SQP loop.
-            solver._elastic_energy,
-            buffers.should_refine,
-        ],
-        outputs=[buffers.candidate_edges, buffers.candidate_scores],
-    )
-
-    wp.copy(buffers.candidate_order[: buffers.max_candidates], buffers.candidate_order_iota)
-    wp.utils.radix_sort_pairs(buffers.candidate_scores, buffers.candidate_order, buffers.max_candidates)
-
-    buffers.split_hashmap_keys.fill_(wp.uint64(0))
-    wp.launch(
-        extract_top_k_candidates,
-        dim=buffers.k,
-        inputs=[
-            buffers.candidate_edges,
-            buffers.candidate_order,
-            buffers.candidate_scores,
-            buffers.max_candidates,
-            buffers.k,
-            min_refine_score,
-            buffers.split_hashmap_size,
+            additional_state_in.active_tet_count,
+            refinement_buffers.threshold,
+            additional_state_in.tet_indices,
+            refinement_buffers.candidate_hashmap_size,
+            refinement_buffers.candidate_hashmap_keys,
+            refinement_buffers.candidate_hashmap_scores,
+            refinement_buffers.candidate_hashmap_flag,
         ],
         outputs=[
-            buffers.split_candidates,
-            buffers.split_scores,
-            buffers.split_hashmap_keys,
-            buffers.split_hashmap_values,
-        ],
+            refinement_buffers.tet_candidate,
+        ]
+    )
+
+
+    for _ in range(conflict_iterations):
+        wp.launch(
+            remove_conflicting_candidates,
+            dim=refinement_buffers.max_tets,
+            inputs=[
+                additional_state_in.active_tet_count,
+                additional_state_in.tet_indices,
+                refinement_buffers.tet_candidate,
+                refinement_buffers.candidate_hashmap_size,
+                refinement_buffers.candidate_hashmap_keys,
+                refinement_buffers.candidate_hashmap_scores,
+                refinement_buffers.candidate_hashmap_flag,
+            ]
+        )
+
+
+        wp.launch(
+            finalize_nonconflicting_candidates,
+            dim=refinement_buffers.max_tets,
+            inputs=[
+                additional_state_in.active_tet_count,
+                additional_state_in.tet_indices,
+                refinement_buffers.tet_candidate,
+                refinement_buffers.candidate_hashmap_size,
+                refinement_buffers.candidate_hashmap_keys,
+                refinement_buffers.candidate_hashmap_scores,
+                refinement_buffers.candidate_hashmap_flag,
+            ]
+        )
+
+        wp.launch(
+            udpate_tet_candidate,
+            dim=refinement_buffers.max_tets,
+            inputs=[
+                additional_state_in.active_tet_count,
+                refinement_buffers.threshold,
+                additional_state_in.tet_indices,
+                refinement_buffers.tet_candidate,
+                refinement_buffers.candidate_hashmap_size,
+                refinement_buffers.candidate_hashmap_keys,
+                refinement_buffers.candidate_hashmap_scores,
+                refinement_buffers.candidate_hashmap_flag,
+            ]
+        )
+
+
+
+
+    wp.launch(
+        remove_conflicting_candidates,
+        dim=refinement_buffers.max_tets,
+        inputs=[
+            additional_state_in.active_tet_count,
+            additional_state_in.tet_indices,
+            refinement_buffers.tet_candidate,
+            refinement_buffers.candidate_hashmap_size,
+            refinement_buffers.candidate_hashmap_keys,
+            refinement_buffers.candidate_hashmap_scores,
+            refinement_buffers.candidate_hashmap_flag,
+        ]
+    )
+    
+
+    wp.launch(
+        invalidate_failed_candidates,
+        dim=refinement_buffers.max_tets,
+        inputs=[
+            additional_state_in.active_tet_count,
+            refinement_buffers.tet_candidate,
+            refinement_buffers.candidate_hashmap_size,
+            refinement_buffers.candidate_hashmap_keys,
+            refinement_buffers.candidate_hashmap_scores,
+            refinement_buffers.candidate_hashmap_flag,
+        ]
     )
 
     wp.launch(
-        get_tet_split_edge_candidates_fixed,
-        dim=max_tets,
-        inputs=[
-            additional_state_0.active_tet_count,
-            additional_state_0.tet_indices,
-            buffers.split_hashmap_keys,
-            buffers.split_hashmap_values,
-            buffers.split_hashmap_size,
-        ],
-        outputs=[buffers.tet_candidates, buffers.tet_candidate_ct],
+        gate_refine_pass,
+        dim=refinement_buffers.max_tets,
+        inputs=[refinement_buffers.pass_counter, int(refine_every)],
+        outputs=[refinement_buffers.tet_candidate],
     )
+    wp.launch(advance_pass_counter, dim=1, inputs=[refinement_buffers.pass_counter])
 
-    # A tet can only legally bisect on one edge; greedily strip the
-    # worst-scored conflicting edge (globally, via the shared hashmap) until
-    # every tet has at most one surviving candidate. 5 is a static constant
-    # (mirrors mesh_topology.py), not data-dependent, so this loop needs no
-    # wp.capture_while.
-    for i in range(5):
-        wp.launch(
-            remove_worst_candidate,
-            dim=max_tets,
-            inputs=[
-                buffers.tet_candidates,
-                buffers.tet_candidate_ct,
-                buffers.split_hashmap_keys,
-                buffers.split_hashmap_values,
-                buffers.split_hashmap_size,
-                5 - i,
-                buffers.split_candidates,
-                buffers.split_scores,
-            ],
-        )
-        wp.launch(
-            update_tet_candidates,
-            dim=max_tets,
-            inputs=[
-                buffers.split_hashmap_keys,
-                buffers.split_hashmap_values,
-                buffers.split_hashmap_size,
-                buffers.split_candidates,
-                buffers.split_scores,
-                buffers.tet_candidates,
-                buffers.tet_candidate_ct,
-            ],
-        )
+    tet_index_map = refinement_buffers.tet_split_counts
+    new_vertex_index_map = refinement_buffers.new_vertex_index
 
-    buffers.new_tet_count.zero_()
-    buffers.new_vertex_count.zero_()
-    # -1 sentinel: an accepted candidate's vertex claim can fail if
-    # max_particles is exhausted (see claim_new_vertices), and
-    # scatter_refined_tets needs to distinguish "claim succeeded at id 0"
-    # from "claim never happened."
-    buffers.candidate_new_vertex_id.fill_(-1)
+    def count_and_scan_splits():
+        # Rebuild the hashmap from the finalized candidates only, count the
+        # tets / new vertices each tet contributes, and exclusive-scan both so
+        # the last entries hold the totals.
+        refinement_buffers.candidate_hashmap_keys.zero_()
+        refinement_buffers.tet_split_counts.zero_()
+        refinement_buffers.new_vertex_index.zero_()
+        wp.launch(
+            populate_chosen_candidates,
+            dim=refinement_buffers.max_tets,
+            inputs=[
+                additional_state_in.active_tet_count,
+                refinement_buffers.tet_candidate,
+                refinement_buffers.candidate_hashmap_size,
+                refinement_buffers.candidate_hashmap_keys,
+                refinement_buffers.tet_split_counts,
+                refinement_buffers.new_vertex_index,
+            ]
+        )
+        wp.utils.array_scan(refinement_buffers.tet_split_counts, tet_index_map, inclusive=False)
+        wp.utils.array_scan(new_vertex_index_map, refinement_buffers.new_vertex_index, inclusive=False)
+
+    count_and_scan_splits()
+
+    # Capacity guard: a pass that would overflow max_tets / max_vertices is
+    # dropped wholesale (every candidate cleared, counts rebuilt) rather than
+    # writing past the buffers. Done on the device so it is CUDA-graph safe.
+    wp.launch(
+        check_split_capacity,
+        dim=1,
+        inputs=[
+            tet_index_map,
+            new_vertex_index_map,
+            additional_state_in.active_particle_count,
+            refinement_buffers.max_tets,
+            refinement_buffers.max_vertices,
+        ],
+        outputs=[refinement_buffers.split_overflow],
+    )
+    wp.launch(
+        drop_candidates_on_overflow,
+        dim=refinement_buffers.max_tets,
+        inputs=[refinement_buffers.split_overflow],
+        outputs=[refinement_buffers.tet_candidate],
+    )
+    count_and_scan_splits()
+
+    wp.copy(additional_state_out.active_tet_count, tet_index_map[-1:])
+    additional_state_out.active_particle_count += new_vertex_index_map[-1:]
+
+    candidate_new_vertex_hashmap_indices = refinement_buffers.candidate_hashmap_scores.view(dtype=wp.int32)
+
+    wp.launch(
+        make_candidate_new_vertex_mapping,
+        dim=refinement_buffers.max_tets,
+        inputs=[
+            additional_state_in.active_tet_count,
+            additional_state_in.active_particle_count,
+            refinement_buffers.tet_candidate,
+            new_vertex_index_map,
+            refinement_buffers.candidate_hashmap_size,
+            refinement_buffers.candidate_hashmap_keys,
+        ],
+        outputs=[
+            candidate_new_vertex_hashmap_indices,
+        ]
+    )
 
     wp.launch(
         claim_new_vertices,
-        dim=buffers.k,
+        dim=refinement_buffers.max_tets,
         inputs=[
-            buffers.split_candidates,
-            buffers.split_hashmap_keys,
-            buffers.split_hashmap_size,
-            additional_state_0.active_particle_count,
-            solver.max_particles,
-            additional_state_0.rest_particle_q,
+            refinement_buffers.candidate_hashmap_size,
+            refinement_buffers.candidate_hashmap_keys,
+            candidate_new_vertex_hashmap_indices,
+            additional_state_in.active_tet_count,
+            refinement_buffers.tet_candidate,
+            new_vertex_index_map,
+            split_position,
+        ],
+        outputs=[
             state_out.particle_q,
             state_out.particle_qd,
+            additional_state_out.rest_particle_q,
+        ]
+    )
+
+    model.particle_mass.zero_()
+    wp.launch(
+        scatter_tets,
+        dim=refinement_buffers.max_tets,
+        inputs=[
+            refinement_buffers.candidate_hashmap_size,
+            refinement_buffers.candidate_hashmap_keys,
+            candidate_new_vertex_hashmap_indices,
+            additional_state_in.active_tet_count,
+            additional_state_in.tet_indices,
+            additional_state_in.tet_stretch,
+            additional_state_in.tet_poses,
+            additional_state_in.tet_lambda,
+            additional_state_in.tet_materials,
+            refinement_buffers.tet_candidate,
+            tet_index_map,
+            density,
         ],
         outputs=[
-            buffers.new_vertex_count,
-            additional_state_1.rest_particle_q,
-            buffers.candidate_new_vertex_id,
-        ],
+            additional_state_out.rest_particle_q,
+            model.particle_mass,
+            additional_state_out.tet_indices,
+            additional_state_out.tet_stretch,
+            additional_state_out.tet_poses,
+            additional_state_out.tet_lambda,
+            additional_state_out.tet_materials,
+        ]
     )
 
+    # Surface tris are updated the same way the tets are: any tri edge that
+    # matches one of this pass's finalized split edges (candidate_hashmap_keys
+    # was just rebuilt above, by populate_chosen_candidates, to contain only
+    # those) gets its tri split in two around the same new vertex; everything
+    # else is copied through unchanged.
+    refinement_buffers.tri_split_counts.zero_()
     wp.launch(
-        scatter_refined_tets,
-        dim=max_tets,
+        get_tri_candidate,
+        dim=refinement_buffers.max_tris,
         inputs=[
-            additional_state_0.active_tet_count,
-            max_tets,
-            additional_state_0.tet_indices,
-            additional_state_0.tet_stretch,
-            additional_state_0.tet_lambda,
-            additional_state_0.tet_materials,
-            additional_state_0.tet_poses,
-            buffers.tet_candidates,
-            buffers.tet_candidate_ct,
-            buffers.split_candidates,
-            buffers.candidate_new_vertex_id,
-            additional_state_0.active_particle_count,
-            additional_state_1.rest_particle_q,
+            additional_state_in.active_tri_count,
+            additional_state_in.tri_indices,
+            refinement_buffers.candidate_hashmap_size,
+            refinement_buffers.candidate_hashmap_keys,
         ],
         outputs=[
-            buffers.new_tet_count,
-            additional_state_1.tet_indices,
-            additional_state_1.tet_stretch,
-            additional_state_1.tet_lambda,
-            additional_state_1.tet_materials,
-            additional_state_1.tet_poses,
-        ],
+            refinement_buffers.tri_candidate,
+            refinement_buffers.tri_split_counts,
+        ]
     )
 
-    wp.launch(
-        finalize_active_counts,
-        dim=1,
-        inputs=[additional_state_0.active_particle_count, max_tets, solver.max_particles, buffers.new_tet_count, buffers.new_vertex_count],
-        outputs=[additional_state_1.active_tet_count, additional_state_1.active_particle_count],
-    )
+    tri_index_map = refinement_buffers.tri_split_counts
+    wp.utils.array_scan(refinement_buffers.tri_split_counts, tri_index_map, inclusive=False)
+    wp.copy(additional_state_out.active_tri_count, tri_index_map[-1:])
 
     wp.launch(
-        interpolate_new_particle_mass,
-        dim=buffers.k,
+        scatter_tris,
+        dim=refinement_buffers.max_tris,
         inputs=[
-            buffers.split_candidates,
-            buffers.split_hashmap_keys,
-            buffers.split_hashmap_size,
-            buffers.candidate_new_vertex_id,
-            additional_state_0.active_particle_count,
-            solver.model.particle_mass,
-            solver.model.particle_inv_mass,
+            refinement_buffers.candidate_hashmap_size,
+            refinement_buffers.candidate_hashmap_keys,
+            candidate_new_vertex_hashmap_indices,
+            additional_state_in.active_tri_count,
+            additional_state_in.tri_indices,
+            refinement_buffers.tri_candidate,
+            tri_index_map,
         ],
-    )
-
-    # Topology-dependent scratch (sparse constraint-gradient topology, the
-    # mass matrix, and the ARAP Hessian blocks) all go stale the moment
-    # tet_indices/active_tet_count change -- and since scatter_refined_tets
-    # can reshuffle tet slot order even on a no-op pass (see docstring
-    # above), these are refreshed every step, not just on steps that
-    # actually split something.
-    solver._update_constraint_gradient_topology(additional_state_1)
-    solver._refresh_mass_matrix(additional_state_1)
-    wp.launch(
-        arap_energy_hessian_kernel,
-        dim=max_tets,
-        inputs=[
-            additional_state_1.active_tet_count,
-            additional_state_1.tet_materials,
-            additional_state_1.tet_poses,
-        ],
-        outputs=[solver._hessian_ds_blocks, solver._inv_hessian_ds_blocks],
+        outputs=[
+            additional_state_out.tri_indices,
+        ]
     )

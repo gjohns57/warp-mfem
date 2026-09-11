@@ -26,7 +26,7 @@ def _rest_volume_total(solver: RefinementSolver):
     return active_tets, active_verts, float(vols.sum())
 
 
-def _build_grid_solver(refine_every_n_steps: int, max_new_vertices_per_refine: int, min_refine_score: float):
+def _build_grid_solver(refine_every_n_steps: int, max_new_vertices_per_refine: int, min_refine_score: float, **solver_kwargs):
     builder = newton.ModelBuilder(gravity=-9.81)
     builder.add_soft_grid(
         pos=wp.vec3(0.0, 0.0, 0.0),
@@ -46,14 +46,14 @@ def _build_grid_solver(refine_every_n_steps: int, max_new_vertices_per_refine: i
     )
     base_model = builder.finalize()
 
-    from mfem.refinement.sim import MFEMRefinementModel, load_sim_model
+    from mfem.refinement.models import MFEMRefinementModel
 
     refinement_model = MFEMRefinementModel.from_model(
         base_model, max_particles=base_model.particle_count * 4, max_tets=base_model.tet_count * 4
     )
 
     builder2 = newton.ModelBuilder(gravity=-9.81)
-    model = load_sim_model(refinement_model, builder2)
+    model = refinement_model.load_sim_model(builder2, mu=1.0e1)
 
     inv_mass = model.particle_inv_mass.numpy()
     inv_mass[0] = 0.0
@@ -66,15 +66,31 @@ def _build_grid_solver(refine_every_n_steps: int, max_new_vertices_per_refine: i
         refine_every_n_steps=refine_every_n_steps,
         max_new_vertices_per_refine=max_new_vertices_per_refine,
         min_refine_score=min_refine_score,
+        **solver_kwargs,
     )
     return model, solver
 
 
-def test_refinement_conserves_volume_and_grows_mesh():
+# Per-scoring-mode solver kwargs: the geometric score is dimensionless and has
+# its own threshold; the grid has no rigid shapes, so only its elastic term
+# fires there. Edges must be >= 2 * refine_min_edge_length to be split, so
+# keep that below the 0.2 grid cell.
+SCORING_MODES = {
+    # The solver's legacy tet weight defaults to 0 and the vertex term is
+    # contact only, so give the legacy score an elastic term here.
+    "legacy": dict(refine_tet_score_weight=1.0),
+    "geometric": dict(refine_scoring="geometric", refine_geometric_threshold=1.0e-6, refine_min_edge_length=0.05),
+}
+
+
+@pytest.mark.parametrize("scoring", sorted(SCORING_MODES))
+def test_refinement_conserves_volume_and_grows_mesh(scoring):
     """Splitting a tet must never orphan a vertex or change the total rest
     volume of the mesh, and the mesh should actually grow under gravity-
     induced deformation over enough steps."""
-    model, solver = _build_grid_solver(refine_every_n_steps=3, max_new_vertices_per_refine=4, min_refine_score=1.0e-6)
+    model, solver = _build_grid_solver(
+        refine_every_n_steps=3, max_new_vertices_per_refine=4, min_refine_score=1.0e-6, **SCORING_MODES[scoring]
+    )
 
     state_0 = model.state()
     state_1 = model.state()
@@ -107,7 +123,8 @@ def test_refinement_conserves_volume_and_grows_mesh():
     assert av > av0, "expected the mesh to have grown (gained particles) under gravity-induced deformation"
 
 
-def test_refinement_under_cuda_graph_capture():
+@pytest.mark.parametrize("scoring", sorted(SCORING_MODES))
+def test_refinement_under_cuda_graph_capture(scoring):
     """Capturing solver.step() into a CUDA graph and replaying it repeatedly
     must produce the same correctness invariants as eager stepping: no
     orphaned vertices, conserved volume, finite state, and a mesh that
@@ -122,7 +139,9 @@ def test_refinement_under_cuda_graph_capture():
     if not wp.get_device().is_cuda:
         pytest.skip("CUDA graph capture requires a CUDA device")
 
-    model, solver = _build_grid_solver(refine_every_n_steps=3, max_new_vertices_per_refine=4, min_refine_score=1.0e-6)
+    model, solver = _build_grid_solver(
+        refine_every_n_steps=3, max_new_vertices_per_refine=4, min_refine_score=1.0e-6, **SCORING_MODES[scoring]
+    )
 
     control = model.control()
     contacts = model.contacts()
@@ -167,3 +186,25 @@ def test_refinement_under_cuda_graph_capture():
 
     assert at > at0, "expected the mesh to have grown (gained tets) under gravity-induced deformation"
     assert av > av0, "expected the mesh to have grown (gained particles) under gravity-induced deformation"
+
+
+def test_refine_every_gates_passes_on_the_device():
+    """With refine_every_n_steps=3 the mesh may only grow on every third
+    solver step (steps 0, 3, 6, ...), counted on the device."""
+    model, solver = _build_grid_solver(
+        refine_every_n_steps=3, max_new_vertices_per_refine=4, min_refine_score=1.0e-6,
+        **SCORING_MODES["geometric"]
+    )
+    s0, s1 = model.state(), model.state()
+    control, contacts = model.control(), model.contacts()
+    grew_on = []
+    prev = _rest_volume_total(solver)[1]
+    for i in range(12):
+        solver.step(s0, s1, control, contacts, 1.0 / 240.0)
+        s0, s1 = s1, s0
+        cur = _rest_volume_total(solver)[1]
+        if cur > prev:
+            grew_on.append(i)
+        prev = cur
+    assert grew_on, "expected some refinement within 12 steps"
+    assert all(i % 3 == 0 for i in grew_on), f"mesh grew on non-refining steps: {grew_on}"

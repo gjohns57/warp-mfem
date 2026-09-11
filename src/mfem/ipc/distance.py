@@ -37,3 +37,21 @@ def capsule_sdf(point: wp.vec3, radius: wp.float32, half_height: wp.float32):
         hessian = (identity - wp.outer(ez, ez) - wp.outer(n, n)) / rho_safe
 
     return d, n, hessian
+
+
+@wp.func
+def plane_sdf(point: wp.vec3):
+    """Signed distance, gradient, and Hessian from `point` to a plane.
+
+    The plane passes through the origin with its normal along +Z, matching the
+    local frame Newton uses for GeoType.PLANE shapes (the collision normal is
+    the local Z-axis). The plane is treated as infinite, so width/length are
+    ignored -- this is what lets it act as a ground support. The signed
+    distance is simply the local Z coordinate: positive above the plane,
+    negative once a particle has sunk through it. The gradient is constant and
+    the Hessian vanishes.
+    """
+    d = point[2]
+    n = wp.vec3(0.0, 0.0, 1.0)
+    hessian = wp.mat33(0.0)
+    return d, n, hessian

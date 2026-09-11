@@ -25,6 +25,8 @@ class AdditionalState:
         active_tet_count: wp.array[wp.int32],
         active_particle_count: wp.array[wp.int32],
         rest_particle_q: wp.array[wp.vec3],
+        tri_indices: wp.array2d[wp.int32],
+        active_tri_count: wp.array[wp.int32],
     ):
         self.tet_indices = tet_indices
         self.tet_stretch = tet_stretch
@@ -36,11 +38,18 @@ class AdditionalState:
 
         self.rest_particle_q = rest_particle_q
 
+        # Surface triangulation (indices into the same particle array as
+        # tet_indices), kept up to date across refinement passes the same way
+        # tet_indices is -- see refine() / scatter_tris in refinement.py.
+        self.tri_indices = tri_indices
+        self.active_tri_count = active_tri_count
+
     @classmethod
     def from_model(
         cls,
         model: Model,
         max_tets: int,
+        max_tris: int,
     ):
         tet_indices = wp.empty((max_tets, 4), dtype=wp.int32)
         tet_stretch = wp.empty(max_tets, dtype=vec6)
@@ -57,6 +66,14 @@ class AdditionalState:
         wp.copy(tet_indices, model.tet_indices)
         wp.copy(tet_poses, model.tet_poses)
         wp.copy(tet_materials, model.tet_materials)
+
+        # model.tri_indices is the surface triangulation newton computes for
+        # the soft mesh at build time (add_soft_mesh), indices into the same
+        # particle array as tet_indices. It's already (num_tris, 3), not flat.
+        tri_count = model.tri_indices.shape[0]
+        tri_indices = wp.empty((max_tris, 3), dtype=wp.int32)
+        active_tri_count = wp.array([tri_count], dtype=wp.int32)
+        wp.copy(tri_indices, model.tri_indices)
 
         wp.launch(
             get_active_particles,
@@ -88,6 +105,8 @@ class AdditionalState:
             active_tet_count,
             active_particle_count,
             rest_particle_q,
+            tri_indices,
+            active_tri_count,
         )
 
     def clone(self):
@@ -100,8 +119,10 @@ class AdditionalState:
             wp.clone(self.active_tet_count),
             wp.clone(self.active_particle_count),
             wp.clone(self.rest_particle_q),
+            wp.clone(self.tri_indices),
+            wp.clone(self.active_tri_count),
         )
-    
+
     def asign(self, other: AdditionalState):
         wp.copy(other.active_particle_count, self.active_particle_count)
         wp.copy(other.active_tet_count, self.active_tet_count)
@@ -111,3 +132,5 @@ class AdditionalState:
         wp.copy(other.tet_poses, self.tet_poses)
         wp.copy(other.tet_stretch, self.tet_stretch)
         wp.copy(other.tet_materials, self.tet_materials)
+        wp.copy(other.active_tri_count, self.active_tri_count)
+        wp.copy(other.tri_indices, self.tri_indices)
