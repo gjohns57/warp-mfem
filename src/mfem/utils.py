@@ -302,19 +302,42 @@ def invert_diagonal_bsr(mat: ws.BsrMatrix) -> ws.BsrMatrix:
     return mat
 
 
-def plot_bsr(mat: ws.BsrMatrix, ax=None, title: str = "") -> None:
+def plot_bsr(
+    mat: ws.BsrMatrix,
+    ax=None,
+    title: str = "",
+    rows: slice | tuple[int, int] | None = None,
+    cols: slice | tuple[int, int] | None = None,
+) -> None:
     import matplotlib.pyplot as plt
     from matplotlib.colors import LinearSegmentedColormap, TwoSlopeNorm
 
+    def _bounds(sel, n):
+        if sel is None:
+            return 0, n
+        if isinstance(sel, slice):
+            start, stop, _ = sel.indices(n)
+            return start, stop
+        start, stop = sel
+        return start, stop
+
+    row_start, row_stop = _bounds(rows, mat.nrow)
+    col_start, col_stop = _bounds(cols, mat.ncol)
+
     offsets = mat.offsets.numpy()
+    row_counts = mat.row_counts.numpy()
     columns = mat.columns.numpy()
     values = mat.scalar_values.numpy()
     br, bc = mat.block_shape
-    dense = np.zeros((mat.nrow * br, mat.ncol * bc), dtype=np.float32)
-    for row in range(mat.nrow):
-        for k in range(offsets[row], offsets[row + 1]):
+    dense = np.zeros(((row_stop - row_start) * br, (col_stop - col_start) * bc), dtype=np.float32)
+    for row in range(row_start, row_stop):
+        for k in range(offsets[row], offsets[row] + row_counts[row]):
             col = columns[k]
-            dense[row * br : (row + 1) * br, col * bc : (col + 1) * bc] = values[k]
+            if col < col_start or col >= col_stop:
+                continue
+            r = row - row_start
+            c = col - col_start
+            dense[r * br : (r + 1) * br, c * bc : (c + 1) * bc] = values[k]
 
     cmap = LinearSegmentedColormap.from_list("rbg", ["red", "black", "green"])
     abs_max = max(float(np.abs(dense).max()), 1e-8)
@@ -338,7 +361,6 @@ def plot_array(arr: wp.array):
 
     plt.plot(arr.numpy())
     plt.show()
-
 
 def linear_accumulate(a: wp.array, b: wp.array, alpha: float = 1.0, beta: float = 1.0):
     wp.launch(_linear_accumulate, dim=a.shape[0], inputs=[b, alpha, beta], outputs=[a])

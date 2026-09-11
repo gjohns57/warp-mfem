@@ -4,11 +4,170 @@ import newton.solvers
 import numpy as np
 import nvtx
 import warp as wp
+from newton._src.viewer.gl.opengl import RendererGL
+from newton.viewer import ViewerGL, ViewerUSD
+from pxr import UsdGeom
+from pyglet.window.key import _0
 
 from mfem import MFEMSolver
 from mfem.boundary_condition import DirichletBoundaryCondition
 from mfem.energies import ARAPEnergy, NeoHookeanEnergy
+from mfem.refinement import FEMTopology
+from mfem.refinement.mesh_topology import tet_emit_edges
 from mfem.types import float_type, vec3
+
+
+@wp.kernel
+def distribute_tet_energies(
+    tet_energies: wp.array[wp.float32],
+    tet_indices: wp.array2d[wp.int32],
+    normalization: wp.array[wp.float32],
+    vertex_values: wp.array[wp.float32],
+):
+    tid = wp.tid()
+
+    i0 = tet_indices[tid, 0]
+    i1 = tet_indices[tid, 1]
+    i2 = tet_indices[tid, 2]
+    i3 = tet_indices[tid, 3]
+
+    wp.atomic_add(vertex_values, i0, tet_energies[tid])
+    wp.atomic_add(vertex_values, i1, tet_energies[tid])
+    wp.atomic_add(vertex_values, i2, tet_energies[tid])
+    wp.atomic_add(vertex_values, i3, tet_energies[tid])
+    wp.atomic_add(normalization, i0, 1.0)
+    wp.atomic_add(normalization, i1, 1.0)
+    wp.atomic_add(normalization, i2, 1.0)
+    wp.atomic_add(normalization, i3, 1.0)
+
+
+@wp.kernel
+def add_proximity_score(
+    tet_energies: wp.array[wp.float32],
+    tet_indices: wp.array2d[wp.int32],
+    particle_q: wp.array[wp.vec3],
+    body_q: wp.array[wp.transform],
+):
+    tid = wp.tid()
+    body_position = wp.transform_get_translation(body_q[0])
+    x0 = particle_q[tet_indices[tid, 0]]
+    x1 = particle_q[tet_indices[tid, 1]]
+    x2 = particle_q[tet_indices[tid, 2]]
+    x3 = particle_q[tet_indices[tid, 3]]
+
+    radius = 0.5
+    distance = (
+        wp.min(
+            wp.min(wp.length(body_position - x0), wp.length(body_position - x1)),
+            wp.min(wp.length(body_position - x2), wp.length(body_position - x3)),
+        )
+        - radius
+    )
+
+    tet_energies[tid] += 0.025 / distance
+
+
+# @wp.kernel
+# def distribute_tet_energies_to_edges(
+#     tet_energies: wp.array[wp.float32],
+#     tet_indices: wp.array[wp.float32],
+#     edges: wp.array[wp.float32],
+# )
+
+
+@wp.kernel
+def distribute_tet_energies_to_edges(
+    tet_energies: wp.array[wp.float32],
+    tet_edges: wp.array2d[wp.int32],
+    edge_energies: wp.array[wp.float32],
+):
+    tid = wp.tid()
+
+    for i in range(6):
+        edge_index = tet_edges[tid, i]
+        wp.atomic_add(edge_energies, edge_index, tet_energies[tid])
+
+
+def get_candidates(
+    state: newton.State,
+    topology: FEMTopology,
+    tet_energies: wp.array[wp.float32],
+    selection_percentile: wp.float32 = 0.9,
+):
+    edge_scores = wp.zeros(topology.edge_ct * 2, dtype=wp.float32)
+
+    wp.launch(
+        distribute_tet_energies_to_edges,
+        dim=topology.tet_ct,
+        inputs=[
+            tet_energies,
+            topology.tet_edges,
+        ],
+        outputs=[edge_scores],
+    )
+
+    candidates = topology.edges
+    wp.utils.radix_sort_pairs(edge_scores, candidates)
+
+    candidates = candidates[int(float(candidates.shape[0] * selection_percentile)) :]
+    candidate_scores = edge_scores[
+        int(float(edge_scores.shape[0] * selection_percentile)) :
+    ]
+    return candidates, candidate_scores
+
+
+def refine_mesh(
+    solver: MFEMSolver,
+    model: newton.Model,
+    state_0: newton.State,
+    topology: FEMTopology,
+):
+    tet_energies = wp.zeros(model.tet_count, dtype=wp.float32)
+    solver._material_model.energy(
+        solver._s,
+        model.tet_materials,
+        solver._tet_rest_volumes,
+        tet_energies,
+    )
+
+    candidates, candidate_scores = get_candidates(
+        state_0,
+        topology,
+        tet_energies=tet_energies,
+        selection_percentile=0.9,
+    )
+
+    topology.split_edges(candidates, candidate_scores)
+
+    model.tet_indices = topology.tets
+    model.tet_count = topology.tet_ct
+    model.particle_count = topology.vertex_ct
+    model.particle_q = topology.vertices
+
+
+def make_lut(n=256):
+    """Blue -> white -> red diverging LUT as a (1, n, 3) uint8 image."""
+    t = np.linspace(0.0, 1.0, n)[:, None]
+    green = np.array([[0.10, 0.85, 0.2]])
+    yellow = np.array([[0.85, 0.85, 0.01]])
+    red = np.array([[0.85, 0.15, 0.15]])
+
+    a = np.clip(t * 2.0, 0.0, 1.0)
+    b = np.clip(t * 2.0 - 1.0, 0.0, 1.0)
+    rgb = green * (1.0 - a) + yellow * a
+    rgb = rgb * (1.0 - b) + red * b
+    return (rgb * 255.0).astype(np.uint8)[None, :, :]  # (1, n, 3)
+
+
+@wp.kernel
+def color_vertices(
+    value: wp.array[wp.float32],  # one scalar per particle
+    lo: float,
+    hi: float,
+    uvs: wp.array[wp.vec2],
+):
+    i = wp.tid()
+    uvs[i] = wp.vec2(wp.clamp((value[i] - lo) / (hi - lo), 0.0, 1.0), 0.5)
 
 
 @wp.kernel
@@ -55,7 +214,7 @@ class MFEMExample:
         dim_x = args.dimx
         dim_y = args.dimy
         dim_z = args.dimz
-        cell_size = 0.25
+        cell_size = 0.2
         energy = None
         if args.energy == "arap":
             energy = ARAPEnergy
@@ -63,7 +222,7 @@ class MFEMExample:
             energy = NeoHookeanEnergy
 
         builder.add_soft_grid(
-            pos=wp.vec3(0.0, 0.0, 0.0),
+            pos=wp.vec3(-cell_size * dim_x / 2.0, -cell_size * dim_y / 2.0, 0.0),
             rot=wp.quat_identity(),
             vel=wp.vec3(0.0, 0.0, 0.0),
             dim_x=dim_x,
@@ -72,49 +231,58 @@ class MFEMExample:
             cell_x=cell_size,
             cell_y=cell_size,
             cell_z=cell_size,
-            density=0.5,
+            density=1.0,
             k_mu=mu,
             k_lambda=lmbda,
             k_damp=0.0,
         )
 
+        # builder.add_sha
+
         # Color the mesh for VBD solver
 
+        # body = builder.add_body(
+        #     xform=(wp.vec3(0.0, 2.0, 0.0), wp.quat_identity()),
+        # )
+
+        # builder.add_shape_mesh(
+        #     body, mesh=newton.Mesh.create_sphere(num_latitudes=10, num_longitudes=10)
+        # )
+
         self.model = builder.finalize()
-        print(np.linalg.norm(self.model.particle_q.numpy().reshape((-1, 3))))
+        self._color_gradient = make_lut()
         control_indices = np.argwhere(
             np.linalg.norm(
                 self.model.particle_q.numpy().reshape((-1, 3))
                 - np.array(
                     [
                         [
-                            cell_size * dim_x / 2.0,
-                            cell_size * dim_y / 2.0,
+                            1.0,
+                            0.0,
                             cell_size * dim_z,
                         ]
                     ]
                 ),
                 axis=1,
             )
-            <= 2 * cell_size
+            <= 3 * cell_size
         ).flatten()
 
         fixed_indices = np.argwhere(
             (
-                self.model.particle_q.numpy()[:, 2] <= 0.1
+                self.model.particle_q.numpy()[:, 0] <= -cell_size * dim_x / 2.0
                 # & (self.model.particle_q.numpy()[:, 0] <= 0.5)
                 # & (self.model.particle_q.numpy()[:, 1] <= 0.5)
             )
         ).flatten()
 
-        pin_idx = np.concat([fixed_indices, control_indices])
+        pin_idx = np.concat([fixed_indices])
 
         pin_positions = wp.array(self.model.particle_q.numpy()[pin_idx], dtype=vec3)
         self._attatchment = pin_positions[: len(fixed_indices)]
-        self._control = pin_positions[len(fixed_indices) :]
+        # self._control = pin_positions[len(fixed_indices) :]
         # self._bottom_attatchment = pin_positions[: len(bottom_indices)]
         # self._top_attatchment = pin_positions[len(bottom_indices) :]
-
         self._bc = DirichletBoundaryCondition(
             pin_positions=pin_positions,
             constraint_indices=wp.array(pin_idx, wp.int32),
@@ -122,9 +290,7 @@ class MFEMExample:
                 np.concat(
                     [
                         np.full_like(fixed_indices, fill_value=1.0e3, dtype=wp.float32),
-                        np.full_like(
-                            control_indices, fill_value=1.0e-1, dtype=wp.float32
-                        ),
+                        # np.full_like(control_indices, fill_value=0.0, dtype=wp.float32),
                     ]
                 ),
                 dtype=float_type,
@@ -141,6 +307,8 @@ class MFEMExample:
             attatchements=self._bc,
             # debug_logs=True,
         )
+
+        # self._topology = FEMTopology(self.model, 1 << 20, 1 << 20)
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
         self.control = self.model.control()
@@ -197,17 +365,21 @@ class MFEMExample:
         #     dim=len(self._top_attatchment),
         #     inputs=[self._top_attatchment, self._rotation_center, self._rotation_angle],
         # )
-        self._control += wp.vec3(
-            np.sin(1.0 * self.sim_time) * 0.05,
-            np.cos(1.0 * self.sim_time) * 0.05,
-            np.cos(1.0 * self.sim_time) * 0.02,
-        )
-        self._bc.update_b(self.solver._accumulator)
-        if self.graph:
-            wp.capture_launch(self.graph)
-            self.state_0, self.state_1 = self.state_1, self.state_0
-        else:
-            self.simulate()
+        # self._control += wp.vec3(
+        #     np.sin(1.0e-1 * self.sim_time) * 0.01,
+        #     np.cos(1.0e-1 * self.sim_time) * 0.01,
+        #     np.cos(1.0e-1 * self.sim_time) * 0.02,
+        # )
+        # self._bc.update_b(self.solver._accumulator)
+        #
+
+
+        with wp.ScopedTimer("Step"):
+            if self.graph:
+                wp.capture_launch(self.graph)
+                self.state_0, self.state_1 = self.state_1, self.state_0
+            else:
+                self.simulate()
 
         self.sim_time += self.frame_dt
 
@@ -227,8 +399,117 @@ class MFEMExample:
 
     def render(self):
         self.viewer.begin_frame(self.sim_time)
+
+        # ViewerUSD().log_mesh
         self.viewer.log_state(self.state_0)
-        self.viewer.log_contacts(self.contacts, self.state_0)
+        # particle_elastic_energies = wp.zeros(
+        #     self.model.particle_count, dtype=wp.float32
+        # )
+        # normalization = wp.zeros(self.model.particle_count, dtype=wp.float32)
+        # particle_colors = wp.empty(self.model.particle_q.shape[0], dtype=wp.vec2)
+
+        # # self.solver._objective(self.state_0.particle_q, self.solver._s, wp.zeros(self.model.tet_count, dtype=wp.types.vector(length=6, dtype=wp.float32)))
+        # elastic_energy = wp.zeros(self.model.tet_count, dtype=wp.float32)
+        # self.solver._material_model.energy(
+        #     self.solver._s,
+        #     self.model.tet_materials,
+        #     self.solver._tet_rest_volumes,
+        #     elastic_energy,
+        # )
+
+        # wp.launch(
+        #     add_proximity_score,
+        #     dim=self.model.tet_count,
+        #     inputs=[
+        #         elastic_energy,
+        #         self.model.tet_indices,
+        #         self.state_0.particle_q,
+        #         self.model.body_q,
+        #     ],
+        # )
+        # # print(elastic_energy)
+        # wp.launch(
+        #     distribute_tet_energies,
+        #     dim=self.model.tet_count,
+        #     inputs=[
+        #         elastic_energy,
+        #         self.model.tet_indices,
+        #     ],
+        #     outputs=[
+        #         normalization,
+        #         particle_elastic_energies,
+        #     ],
+        # )
+
+        # particle_elastic_energies /= normalization
+        # wp.launch(
+        #     color_vertices,
+        #     dim=self.model.particle_q.shape[0],
+        #     inputs=[
+        #         particle_elastic_energies,
+        #         0.0,
+        #         0.1,
+        #     ],
+        #     outputs=[particle_colors],
+        # )
+
+        # self.viewer.log_mesh(
+        #     "FEM_Beam",
+        #     self.state_0.particle_q,
+        #     self.model.tri_indices.flatten(),
+        #     texture=self._color_gradient,
+        #     uvs=particle_colors,
+        #     color=wp.vec3(1.0, 1.0, 1.0),
+        #     backface_culling=False,
+        # )
+
+        # scales = wp.full(self.model.body_q.shape[0], wp.vec3(0.5, 0.5, 0.0))
+        # colors = wp.full(self.model.body_q.shape[0], wp.vec3(0.5, 0.5, 0.0))
+        # material = wp.full(self.model.body_q.shape[0], wp.vec4(1.0, 1.0, 1.0, 0.0))
+        # self.viewer.log_capsules(
+        #     "Rigid Object",
+        #     "unused?",
+        #     self.model.body_q,
+        #     scales,
+        #     colors,
+        #     material,
+        # )
+
+        # if isinstance(self.viewer, ViewerGL):
+        #     # log_mesh()'s public API has no way to flip the shader's
+        #     # texture_enable flag (material.w), so the albedo_map sample in
+        #     # shape_fragment_shader is always skipped and the mesh renders
+        #     # as flat ObjectColor. Reach into the backend object and set it
+        #     # directly so the uploaded texture actually gets sampled.
+        #     mesh_obj = self.viewer.objects[self.viewer._qualify("FEM_Beam")]
+        #     r, m, c, _t = mesh_obj.material
+        #     mesh_obj.material = (r, m, c, 1.0)
+
+        #     # _upload_texture_from_file() (re-run every frame by update_texture())
+        #     # always binds GL_REPEAT + mipmapped trilinear filtering. Our LUT is a
+        #     # non-tiling blue->white->red ramp, so filtering across the wrap seam
+        #     # or across mip levels blends the blue and red ends together and shows
+        #     # up as stray purple. Clamp to the edge and drop mipmapping so only
+        #     # the ramp's own colors are ever sampled.
+        #     if mesh_obj.texture_id is not None:
+        #         gl = RendererGL.gl
+        #         gl.glBindTexture(gl.GL_TEXTURE_2D, mesh_obj.texture_id)
+        #         gl.glTexParameteri(
+        #             gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_S, gl.GL_CLAMP_TO_EDGE
+        #         )
+        #         gl.glTexParameteri(
+        #             gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_T, gl.GL_CLAMP_TO_EDGE
+        #         )
+        #         gl.glTexParameteri(
+        #             gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_LINEAR
+        #         )
+        #         gl.glBindTexture(gl.GL_TEXTURE_2D, 0)
+
+        # self.viewer.log_state(self.state_0)
+
+        # if isinstance(self.viewer, ViewerUSD):
+        #     self.solver.log_aabbs(self.viewer)
+        # self.viewer.log_contacts(self.contacts, self.state_0)
         self.viewer.end_frame()
 
         # if self.sim_time >= self.sim_duration:
@@ -285,7 +566,7 @@ class MFEMExample:
             "--mu",
             help="First Lame's parameter for elasticity",
             type=float,
-            default=1.0e2,
+            default=1.0e1,
         )
 
         parser.add_argument(
@@ -294,7 +575,6 @@ class MFEMExample:
             type=float,
             default=4.0e2,
         )
-
         parser.add_argument(
             "-l",
             "--line-search",

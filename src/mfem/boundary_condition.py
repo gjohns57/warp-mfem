@@ -1,3 +1,5 @@
+from typing import Optional
+
 import numpy as np
 import warp as wp
 import warp.sparse as ws
@@ -69,8 +71,8 @@ class DirichletBoundaryCondition:
         res += self._c
 
     def gradient(
-        self, x: wp.array[wp.vec3], grad: wp.array[wp.vec3] | None = None
-    ) -> wp.array[wp.vec3] | None:
+        self, x: wp.array[wp.vec3], grad: Optional[wp.array[wp.vec3]] = None
+    ) -> Optional[wp.array[wp.vec3]]:
         if grad is not None:
             ws.bsr_mv(self._Q, x, grad)
             grad += self._b

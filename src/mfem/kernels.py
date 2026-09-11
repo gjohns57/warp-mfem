@@ -102,7 +102,6 @@ def evaluate_constraints(
     rest: wp.array[mat33],
     constraint: wp.array[vec6],
 ):
-
     tid = wp.tid()
     s = stretch[tid]
 
@@ -189,7 +188,7 @@ def kinetic_objective_kernel(
     x = particle_q[tid]
     y = x_tilde[tid]
     m = mass[tid]
-    objective[tid] = wp.dot(x - y, x - y) * m
+    objective[tid] = 0.5 * wp.dot(x - y, x - y) * m
 
 
 @wp.kernel
@@ -201,7 +200,6 @@ def constraint_objective_kernel(
     lmbda: wp.array[vec6],
     objective: wp.array[float_type],
 ):
-
     tid = wp.tid()
     s = stretch[tid]
 
@@ -210,3 +208,11 @@ def constraint_objective_kernel(
     objective[tid] += wp.dot(
         wp.diag(vec6(1.0, 1.0, 1.0, 2.0, 2.0, 2.0)) * (stretch_grad - s), lmbda[tid]
     )
+
+
+@wp.kernel
+def get_attachments_and_mass(
+    particle_inv_mass: wp.array[wp.float32],
+    attachment_predicate: wp.array[wp.int32],
+):
+    pass

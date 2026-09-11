@@ -26,3 +26,5 @@ if __name__ == "__main__":
     if example.record_energy:
         solver_log = example.solver_log()
         example.solver.write_log("solver_log.parquet")
+
+    example.solver.write_timings("timings_old.json")
