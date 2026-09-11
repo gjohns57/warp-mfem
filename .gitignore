@@ -9,3 +9,61 @@ wheels/
 # Virtual environments
 .venv
 uv.lock
+
+# OS cruft
+.DS_Store
+._*
+
+# --- Simulation data, sweep outputs, and figures ---------------------------
+# Everything generated is ignored. The only exceptions are what the octopus
+# step-timing comparison needs (plot_step_timing.py): the octopus tet meshes,
+# rest shapes, stiffness field and tool trajectory it simulates with, plus the
+# logs its default (no --run) plot reads.
+
+# Recordings and media
+*.mp4
+*.gif
+simulation.npz
+out.*
+
+# Sweep results (sweep_octopus.py); *_space.json configs stay tracked
+sweep_*.jsonl
+sweep_*.csv
+sweep_*.log
+sweep_*_work/*
+sweep_*_retry/
+!sweep_refine_corr_fine_geometric_work/log_norefine*.txt
+!sweep_refine_corr_fine_geometric_work/log_refine_every=10.txt
+!sweep_refine_corr_fine_geometric_work/log_refine_every=10_r?.txt
+
+# Reference / benchmark recordings
+refinement_loss_runs/
+reference_runs/*
+!reference_runs/fine_default.log
+reference_runs_queue*.log
+timing_runs/
+
+# Notebook outputs
+notebooks/*.png
+notebooks/*_cache.npz
+
+# Local symlinks to the PokeFlex_Tracked dataset (machine-specific paths;
+# pokeflex_episodes.py falls back to ~/Documents when they are absent)
+/PlushOctopus_T1
+/FoamDice_T1
+/PlushTurtle_T1
+/ToiletPaperRoll_T1
+
+# Mesh assets: keep only the octopus inputs
+models/*
+!models/octopus_initial_coarse.npz
+!models/octopus_initial_full.npz
+!models/octopus_rest_coarse.npz
+!models/octopus_rest_fine.npz
+!models/octopus_stiffness_field.npz
+!models/PokeFlex_Tracked-tool-trajectories-4objects/
+models/PokeFlex_Tracked-tool-trajectories-4objects/*
+!models/PokeFlex_Tracked-tool-trajectories-4objects/PokeFlex_Tracked-tool-trajectories-4objects/
+models/PokeFlex_Tracked-tool-trajectories-4objects/PokeFlex_Tracked-tool-trajectories-4objects/*
+!models/PokeFlex_Tracked-tool-trajectories-4objects/PokeFlex_Tracked-tool-trajectories-4objects/README.md
+!models/PokeFlex_Tracked-tool-trajectories-4objects/PokeFlex_Tracked-tool-trajectories-4objects/PlushOctopus_T1/
