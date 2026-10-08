@@ -607,5 +607,7 @@ class MFEMSolver(SolverBase):
 
     def write_timings(self, filename: str):
         import json
+        import os
+        os.makedirs(os.path.dirname(filename) or ".", exist_ok=True)
         with open(filename, "w") as f:
             json.dump(self._timings, f)

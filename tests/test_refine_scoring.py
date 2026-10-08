@@ -41,7 +41,7 @@ def _dm_inv(q, tets):
 
 def _run_tet_pass(q, tets, energy, distance=None, shape_id=None, shape_type=(GeoType.CAPSULE,),
                   inv_mass=None, mu=1.0, elastic_weight=1.0, vertex_contact_weight=1.0,
-                  elastic_stats=(0.0, 0.0)):
+                  elastic_stats=(0.0, 0.0), hessian=None, curvature_weight=0.0):
     """elastic_stats = (sum of density / mu, tet count); zeros mean 'absolute
     density' (no mesh-wide mean to be relative to)."""
     q = np.asarray(q, dtype=np.float32); tets = np.asarray(tets, dtype=np.int32)
@@ -61,8 +61,9 @@ def _run_tet_pass(q, tets, energy, distance=None, shape_id=None, shape_type=(Geo
             wp.array(q, dtype=wp.vec3),
             wp.array(np.full(n, 1.0e8, dtype=np.float32) if distance is None else np.asarray(distance, dtype=np.float32), dtype=wp.float32),
             wp.array(np.full(n, -1, dtype=np.int32) if shape_id is None else np.asarray(shape_id, dtype=np.int32), dtype=wp.int32),
+            wp.array(np.zeros((n, 3, 3), dtype=np.float32) if hessian is None else np.asarray(hessian, dtype=np.float32), dtype=wp.mat33),
             wp.array(np.array([int(t) for t in shape_type], dtype=np.int32), dtype=wp.int32),
-            float(D1), float(H_MIN), float(elastic_weight), float(vertex_contact_weight),
+            float(D1), float(H_MIN), float(elastic_weight), float(vertex_contact_weight), float(curvature_weight),
             wp.array(np.asarray(elastic_stats, dtype=np.float32), dtype=wp.float32), int(size),
         ],
         outputs=[keys, scores],
@@ -154,7 +155,8 @@ def test_tri_contact_promotes_edge_nearest_closest_point():
                 wp.array([1], dtype=wp.int32), wp.array(tris, dtype=wp.int32),
                 wp.array(np.ones(4, dtype=np.float32), dtype=wp.float32), wp.array(q, dtype=wp.vec3),
                 wp.array([d], dtype=wp.float32), wp.array([wp.vec3(*bary)], dtype=wp.vec3),
-                float(D1), float(H_MIN), 1.0, int(size),
+                wp.array(np.zeros((4, 3, 3), dtype=np.float32), dtype=wp.mat33),
+                float(D1), float(H_MIN), 1.0, 0.0, int(size),
             ],
             outputs=[k, s],
         )
@@ -196,3 +198,47 @@ def test_elastic_term_is_excess_over_mean_density():
     _, _, sc = _run_tet_pass(Q2, T2, energy=[1.0, 1.0], elastic_stats=(rho, 2.0))
     L = np.linalg.norm(q[0] - q[1])
     assert sc[(0, 1)] == pytest.approx(L / H_MIN, rel=1e-4)
+
+
+def test_curvature_term_scales_edges_across_the_tool_only():
+    """With curvature_weight w the contact score is multiplied by 1 + w L kappa,
+    kappa = t^T H t along the edge: a capsule Hessian (I - nn^T)/rho gives
+    1/rho for an edge across the axis and 0 for one along it; a plane (H = 0)
+    and w = 0 leave the score unchanged."""
+    # Single tet with vertex 0 and 1 in contact; axis of the capsule = z, so
+    # edge (0, 1) along x runs *across* the axis and edge (0, 3) along z runs
+    # *along* it (both endpoints get the same Hessian).
+    q = np.array([(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 0.8, 0.0), (0.0, 0.0, 1.0)], dtype=np.float32)
+    tets = [(0, 1, 2, 3)]
+    rho = 2.0
+    n = np.array([0.0, 1.0, 0.0])            # outward normal at the contact points
+    H = (np.eye(3) - np.outer(n, n)) / rho    # capsule Hessian: 1/rho across, 0 along z? no: 0 along n
+    # (I - nn^T)/rho has eigenvalue 1/rho in every direction orthogonal to n,
+    # so make the "along-axis" check explicit with a cylinder-style Hessian
+    # that is only curved along x.
+    Hx = np.zeros((3, 3)); Hx[0, 0] = 1.0 / rho
+    hess = np.stack([Hx, Hx, np.zeros((3, 3)), Hx]).astype(np.float32)
+    dist = [0.5 * D1, 0.5 * D1, 1.0e8, 0.5 * D1]
+    sid = [0, 0, -1, 0]
+
+    _, _, base = _run_tet_pass(q, tets, energy=[0.0], distance=dist, shape_id=sid)
+    _, _, w0 = _run_tet_pass(q, tets, energy=[0.0], distance=dist, shape_id=sid, hessian=hess, curvature_weight=0.0)
+    _, _, w1 = _run_tet_pass(q, tets, energy=[0.0], distance=dist, shape_id=sid, hessian=hess, curvature_weight=1.0)
+    _, _, w2 = _run_tet_pass(q, tets, energy=[0.0], distance=dist, shape_id=sid, hessian=hess, curvature_weight=2.0)
+    _, _, flat = _run_tet_pass(q, tets, energy=[0.0], distance=dist, shape_id=sid,
+                               hessian=np.zeros((4, 3, 3)), curvature_weight=2.0)
+
+    assert base[(0, 1)] > 0.0
+    # Weight 0 and a flat (plane) Hessian are no-ops.
+    for k in base:
+        assert w0[k] == pytest.approx(base[k], rel=1e-6)
+        assert flat[k] == pytest.approx(base[k], rel=1e-6)
+    # Across the axis: factor 1 + w * L / rho with L = 1.
+    assert w1[(0, 1)] == pytest.approx(base[(0, 1)] * (1.0 + 1.0 / rho), rel=1e-5)
+    assert w2[(0, 1)] == pytest.approx(base[(0, 1)] * (1.0 + 2.0 / rho), rel=1e-5)
+    # Along the axis (edge (0, 3) is along z, Hx has no zz curvature): unchanged.
+    assert base[(0, 3)] > 0.0
+    assert w2[(0, 3)] == pytest.approx(base[(0, 3)], rel=1e-6)
+    # Non-contact edge (2 is out of range on both ends? no: (1, 2) has vertex 1
+    # in contact) -- the edge whose endpoints are both out of contact stays 0.
+    assert w2[(2, 3)] == pytest.approx(base[(2, 3)], rel=1e-6)

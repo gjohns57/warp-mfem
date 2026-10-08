@@ -1,5 +1,5 @@
 """Bundle a PokeFlex episode's identified per-tet stiffness field into the
-``models/<episode>_stiffness_field.npz`` that ``sim_octopus.py
+``models/<episode>_stiffness_field.npz`` that ``octopus_refinement.py
 --per-tet-material`` transfers onto the sim mesh.
 
 The identification fits a spatially-varying Young's modulus -- one E per tet of
@@ -38,7 +38,7 @@ from pathlib import Path
 
 import numpy as np
 
-from mfem.refinement.pokeflex_episodes import EPISODES, get_episode
+from examples.refinement.pokeflex_episodes import EPISODES, get_episode
 
 WORKSPACE_ROOT = Path(__file__).resolve().parents[4]
 MODELS_DIR = WORKSPACE_ROOT / "models"

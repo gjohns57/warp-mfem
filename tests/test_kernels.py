@@ -212,7 +212,8 @@ def test_constraint_gradient_dx_visual():
         fig.colorbar(im2, ax=row_axes[2])
 
     plt.tight_layout()
-    plt.savefig("constraint_gradient_dx.png")
+    import os; os.makedirs("results/figures", exist_ok=True)
+    plt.savefig("results/figures/constraint_gradient_dx.png")
 
     for analytical, fd in rows:
         assert analytical == pytest.approx(fd, abs=5e-2)
@@ -292,7 +293,8 @@ def test_cube_constraint_gradient_dx_visual():
         fig.colorbar(im2, ax=row_axes[2])
 
     plt.tight_layout()
-    plt.savefig("cube_constraint_gradient_dx.png")
+    import os; os.makedirs("results/figures", exist_ok=True)
+    plt.savefig("results/figures/cube_constraint_gradient_dx.png")
 
     for i, (analytical, fd) in enumerate(rows):
         assert analytical == pytest.approx(fd, abs=1e-2)

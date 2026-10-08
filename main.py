@@ -3,7 +3,7 @@ import newton
 import warp as wp
 from newton.examples import init, run
 
-from mfem import MFEMExample
+from examples.demo_example import MFEMExample
 
 if __name__ == "__main__":
     parser = MFEMExample.create_parser()
@@ -14,4 +14,5 @@ if __name__ == "__main__":
     run(example, args)
 
     plt.title("Energy per iteration")
-    plt.savefig("energy.png")
+    import os; os.makedirs("results/figures", exist_ok=True)
+    plt.savefig("results/figures/energy.png")

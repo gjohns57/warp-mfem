@@ -1,0 +1,130 @@
+# Shared defaults for the example scripts (see examples/config.py).
+#
+# Precedence: command line > <script> section > `common` > the script's built-in default.
+# `common` applies to every example that has an option of that name (option names, `-` or `_`);
+# a section named after a script overrides it for that script only. Options left out keep the
+# script's own default (e.g. the per-episode values octopus_refinement resolves from `episode`).
+# Use another file with --config PATH or $MFEM_EXAMPLES_CONFIG.
+
+common:
+  # Scene / material
+  dimx: 15
+  dimy: 10
+  dimz: 10
+  energy: arap
+  gravity: -9.81
+  substeps: 1
+  episode: octopus
+  # Newton-CG solver
+  line_search: false
+  graph_capture: true
+  preconditioner: false
+  cg_tolerance: 1.0e-06
+  preconditioner_singular_threshold: 1.0e-20
+  line_search_alpha0: 1.0
+  line_search_tau: 0.5
+  line_search_c: 0.01
+  line_search_threshold: 1.0e-08
+  # Contact, friction, attachment
+  penetrating_edge_score: 1000000.0
+  attachment_stiffness: 10.0
+  no_tri_contact: false
+  # Adaptive refinement
+  refine: false
+  max_new_vertices: 32
+  refine_split_position: 0.5
+  refine_hashmap_load_factor: 0.5
+  refine_hashmap_edges_per_tet: 6
+  refine_elastic_weight: 1.0
+  refine_contact_weight: 1.0
+  refine_tri_contact_weight: 1.0
+  refine_curvature_weight: 0.0
+  # Tracked-surface overlay
+  tracked_surface_alpha: 0.3
+  tracked_surface_detrend: rigid
+  # Rendering / capture
+  ssaa: 2
+
+octopus_refinement:
+  # Scene / material
+  iterations: 6
+  # Newton-CG solver
+  cg_max_iterations: 1000
+  line_search_max_iterations: 30
+  # Contact, friction, attachment
+  contact_d0: 0.0005
+  contact_d1: 0.002
+  contact_stiffness: 100000.0
+  friction_eps_v: 0.005
+  # Adaptive refinement
+  refine_every: 10
+  refine_tet_score_weight: 100.0
+  refine_vertex_score_weight: 200.0
+  refine_conflict_iterations: 10
+  refine_scoring: geometric
+  refine_geometric_threshold: 1.0
+  # Rendering / capture
+  capsule_alpha: 0.5
+
+soft_body_refinement:
+  # Scene / material
+  mu: 100.0
+  lmbda: 400.0
+  shell_mu: 0.0
+  iterations: 8
+  fps: 24
+  # Newton-CG solver
+  cg_max_iterations: 1000
+  line_search_max_iterations: 20
+  # Contact, friction, attachment
+  contact_d0: 0.01
+  contact_d1: 0.1
+  contact_stiffness: 10000000.0
+  friction_mu: 0.3
+  friction_eps_v: 0.001
+  # Adaptive refinement
+  refine_every: 10
+  refine_density: 1.0
+  refine_tet_score_weight: 0.0
+  refine_vertex_score_weight: 0.1
+  refine_conflict_iterations: 5
+  refine_scoring: legacy
+  refine_geometric_threshold: 1.0
+
+demo_example:
+  # Scene / material
+  mu: 10.0
+  lmbda: 400.0
+  iterations: 8
+  fps: 24
+
+octopus_refinement_closeup:
+  # Adaptive refinement
+  refine_scoring: geometric
+  refine_min_edge_length: 0.0015
+  refine_geometric_threshold: 1.0
+  # Rendering / capture
+  capsule_alpha: 0.45
+  closeup_radius: 0.05
+  pixels: 1000
+
+octopus_refinement_slowmo:
+  # Adaptive refinement
+  refine_every: 1
+  # Rendering / capture
+  capsule_alpha: 0.45
+  closeup_radius: 0.03
+  pixels: 1200
+  frames: 400
+
+sweep_octopus:
+  # Rendering / capture
+  frames: 45
+
+replay_octopus:
+  # Scene / material
+  episode: null
+
+surface_loss:
+  # Scene / material
+  episode: null

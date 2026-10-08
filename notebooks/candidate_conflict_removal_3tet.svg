@@ -1,0 +1,214 @@
+<svg viewBox="0 0 1500 570" xmlns="http://www.w3.org/2000/svg" font-family="Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="arrowhead3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#555"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="1500" height="570" fill="#ffffff"/>
+
+  <!-- Title -->
+  <text x="750" y="28" text-anchor="middle" font-size="19" font-weight="700" fill="#1a1a1a">Candidate Conflict Removal &#8212; Three-Tet Example (edge fan)</text>
+  <text x="750" y="49" text-anchor="middle" font-size="12" fill="#555">
+    Tets A, B, C fan around the shared edge (0,1); B and C additionally share the face {0,1,4}. Each tet already picked its own highest-scoring edge.
+  </text>
+
+  <!-- ============================================================ -->
+  <!-- PANEL 1 : cx=230 -->
+  <!-- ============================================================ -->
+  <g>
+    <text x="230" y="72" text-anchor="middle" font-size="11" fill="#888">pick_highest_score_candidate (done)</text>
+    <text x="230" y="92" text-anchor="middle" font-size="13.5" font-weight="700" fill="#1a1a1a">Step 1 &#8212; three local best edges flagged PENDING</text>
+
+    <!-- wedge regions -->
+    <path d="M230,290 L230,140 L90,385 Z" fill="#f59e0b" fill-opacity="0.10" stroke="#f59e0b" stroke-opacity="0.35" stroke-dasharray="4 3"/>
+    <path d="M230,290 L90,385 L370,385 Z" fill="#2563eb" fill-opacity="0.10" stroke="#2563eb" stroke-opacity="0.35" stroke-dasharray="4 3"/>
+    <path d="M230,290 L370,385 L230,140 Z" fill="#7c3aed" fill-opacity="0.10" stroke="#7c3aed" stroke-opacity="0.35" stroke-dasharray="4 3"/>
+
+    <text x="115" y="232" text-anchor="middle" font-size="11" font-weight="700" fill="#b45309">Tet A {0,1,2,3}</text>
+    <text x="230" y="418" text-anchor="middle" font-size="11" font-weight="700" fill="#1d4ed8">Tet B {0,1,3,4}</text>
+    <text x="345" y="232" text-anchor="middle" font-size="11" font-weight="700" fill="#6d28d9">Tet C {0,1,2,4}</text>
+
+    <!-- always-gray edges: hinge, non-candidate spokes, non-candidate outer edges -->
+    <g stroke="#aaaaaa" stroke-width="2">
+      <line x1="230" y1="273" x2="230" y2="307"/> <!-- hinge 0-1 -->
+      <line x1="230" y1="273" x2="230" y2="140"/> <!-- 0-2 -->
+      <line x1="230" y1="307" x2="230" y2="140"/> <!-- 1-2 -->
+      <line x1="230" y1="273" x2="90"  y2="385"/> <!-- 0-3 -->
+      <line x1="230" y1="307" x2="90"  y2="385"/> <!-- 1-3 -->
+      <line x1="90"  y1="385" x2="370" y2="385"/> <!-- 3-4 -->
+      <line x1="370" y1="385" x2="230" y2="140"/> <!-- 4-2 -->
+    </g>
+
+    <!-- candidate edges -->
+    <line x1="230" y1="140" x2="90"  y2="385" stroke="#f59e0b" stroke-width="5" stroke-linecap="round"/> <!-- A: 2-3 -->
+    <line x1="230" y1="307" x2="370" y2="385" stroke="#2563eb" stroke-width="5" stroke-linecap="round"/> <!-- B: 1-4 -->
+    <line x1="230" y1="273" x2="370" y2="385" stroke="#7c3aed" stroke-width="5" stroke-linecap="round"/> <!-- C: 0-4 -->
+
+    <!-- vertices -->
+    <g>
+      <circle cx="230" cy="273" r="11" fill="#fff" stroke="#222" stroke-width="1.5"/><text x="230" y="277" text-anchor="middle" font-size="11" font-weight="700">0</text>
+      <circle cx="230" cy="307" r="11" fill="#fff" stroke="#222" stroke-width="1.5"/><text x="230" y="311" text-anchor="middle" font-size="11" font-weight="700">1</text>
+      <circle cx="230" cy="140" r="13" fill="#fff" stroke="#222" stroke-width="1.5"/><text x="230" y="145" text-anchor="middle" font-size="12" font-weight="700">2</text>
+      <circle cx="90"  cy="385" r="13" fill="#fff" stroke="#222" stroke-width="1.5"/><text x="90"  y="390" text-anchor="middle" font-size="12" font-weight="700">3</text>
+      <circle cx="370" cy="385" r="13" fill="#fff" stroke="#222" stroke-width="1.5"/><text x="370" y="390" text-anchor="middle" font-size="12" font-weight="700">4</text>
+    </g>
+
+    <!-- per-edge status list -->
+    <g font-size="12">
+      <line x1="130" y1="440" x2="150" y2="440" stroke="#f59e0b" stroke-width="4"/>
+      <text x="156" y="444" fill="#333">(2,3) &#8212; PENDING &#183; A</text>
+      <line x1="130" y1="457" x2="150" y2="457" stroke="#2563eb" stroke-width="4"/>
+      <text x="156" y="461" fill="#333">(1,4) &#8212; PENDING &#183; B</text>
+      <line x1="130" y1="474" x2="150" y2="474" stroke="#7c3aed" stroke-width="4"/>
+      <text x="156" y="478" fill="#333">(0,4) &#8212; PENDING &#183; C</text>
+    </g>
+  </g>
+
+  <!-- ARROW 1 -->
+  <g>
+    <line x1="398" y1="290" x2="582" y2="290" stroke="#555" stroke-width="2" marker-end="url(#arrowhead3)"/>
+    <text x="490" y="240" text-anchor="middle" font-size="12" font-weight="700" fill="#1a1a1a">remove_conflicting_candidates</text>
+    <text x="490" y="258" text-anchor="middle" font-size="10.5" fill="#555">B: (0,4) is PENDING but isn&#8217;t B&#8217;s pick (1,4) &#8594; revert</text>
+    <text x="490" y="272" text-anchor="middle" font-size="10.5" fill="#555">C: (1,4) is PENDING but isn&#8217;t C&#8217;s pick (0,4) &#8594; revert</text>
+    <text x="490" y="314" text-anchor="middle" font-size="10.5" fill="#555">A&#8217;s edge set never touches (0,4) or (1,4)</text>
+    <text x="490" y="328" text-anchor="middle" font-size="10.5" fill="#555">&#8594; (2,3) is left alone, stays PENDING</text>
+  </g>
+
+  <!-- ============================================================ -->
+  <!-- PANEL 2 : cx=750 -->
+  <!-- ============================================================ -->
+  <g>
+    <text x="750" y="72" text-anchor="middle" font-size="11" fill="#888">remove_conflicting_candidates (this round)</text>
+    <text x="750" y="92" text-anchor="middle" font-size="13.5" font-weight="700" fill="#1a1a1a">Step 2 &#8212; B and C&#8217;s shared picks revert</text>
+
+    <path d="M750,290 L750,140 L610,385 Z" fill="#f59e0b" fill-opacity="0.10" stroke="#f59e0b" stroke-opacity="0.35" stroke-dasharray="4 3"/>
+    <path d="M750,290 L610,385 L890,385 Z" fill="#2563eb" fill-opacity="0.10" stroke="#2563eb" stroke-opacity="0.35" stroke-dasharray="4 3"/>
+    <path d="M750,290 L890,385 L750,140 Z" fill="#7c3aed" fill-opacity="0.10" stroke="#7c3aed" stroke-opacity="0.35" stroke-dasharray="4 3"/>
+
+    <text x="635" y="232" text-anchor="middle" font-size="11" font-weight="700" fill="#b45309">Tet A {0,1,2,3}</text>
+    <text x="750" y="418" text-anchor="middle" font-size="11" font-weight="700" fill="#1d4ed8">Tet B {0,1,3,4}</text>
+    <text x="865" y="232" text-anchor="middle" font-size="11" font-weight="700" fill="#6d28d9">Tet C {0,1,2,4}</text>
+
+    <g stroke="#aaaaaa" stroke-width="2">
+      <line x1="750" y1="273" x2="750" y2="307"/>
+      <line x1="750" y1="273" x2="750" y2="140"/>
+      <line x1="750" y1="307" x2="750" y2="140"/>
+      <line x1="750" y1="273" x2="610" y2="385"/>
+      <line x1="750" y1="307" x2="610" y2="385"/>
+      <line x1="610" y1="385" x2="890" y2="385"/>
+      <line x1="890" y1="385" x2="750" y2="140"/>
+    </g>
+
+    <!-- A's candidate: unchanged, still PENDING -->
+    <line x1="750" y1="140" x2="610" y2="385" stroke="#f59e0b" stroke-width="5" stroke-linecap="round"/>
+    <!-- B, C candidates: reverted -->
+    <line x1="750" y1="307" x2="890" y2="385" stroke="#9ca3af" stroke-width="4" stroke-linecap="round" stroke-dasharray="7 6"/>
+    <line x1="750" y1="273" x2="890" y2="385" stroke="#9ca3af" stroke-width="4" stroke-linecap="round" stroke-dasharray="7 6"/>
+
+    <g>
+      <circle cx="750" cy="273" r="11" fill="#fff" stroke="#222" stroke-width="1.5"/><text x="750" y="277" text-anchor="middle" font-size="11" font-weight="700">0</text>
+      <circle cx="750" cy="307" r="11" fill="#fff" stroke="#222" stroke-width="1.5"/><text x="750" y="311" text-anchor="middle" font-size="11" font-weight="700">1</text>
+      <circle cx="750" cy="140" r="13" fill="#fff" stroke="#222" stroke-width="1.5"/><text x="750" y="145" text-anchor="middle" font-size="12" font-weight="700">2</text>
+      <circle cx="610" cy="385" r="13" fill="#fff" stroke="#222" stroke-width="1.5"/><text x="610" y="390" text-anchor="middle" font-size="12" font-weight="700">3</text>
+      <circle cx="890" cy="385" r="13" fill="#fff" stroke="#222" stroke-width="1.5"/><text x="890" y="390" text-anchor="middle" font-size="12" font-weight="700">4</text>
+    </g>
+
+    <g font-size="12">
+      <line x1="650" y1="440" x2="670" y2="440" stroke="#f59e0b" stroke-width="4"/>
+      <text x="676" y="444" fill="#333">(2,3) &#8212; still PENDING</text>
+      <line x1="650" y1="457" x2="670" y2="457" stroke="#9ca3af" stroke-width="4" stroke-dasharray="4 3"/>
+      <text x="676" y="461" fill="#333">(1,4) &#8212; reverted &#8594; AVAILABLE</text>
+      <line x1="650" y1="474" x2="670" y2="474" stroke="#9ca3af" stroke-width="4" stroke-dasharray="4 3"/>
+      <text x="676" y="478" fill="#333">(0,4) &#8212; reverted &#8594; AVAILABLE</text>
+    </g>
+  </g>
+
+  <!-- ARROW 2 -->
+  <g>
+    <line x1="918" y1="290" x2="1102" y2="290" stroke="#555" stroke-width="2" marker-end="url(#arrowhead3)"/>
+    <text x="1010" y="240" text-anchor="middle" font-size="12" font-weight="700" fill="#1a1a1a">finalize_nonconflicting_candidates</text>
+    <text x="1010" y="264" text-anchor="middle" font-size="10.5" fill="#555">(2,3) survived the conflict pass untouched</text>
+    <text x="1010" y="278" text-anchor="middle" font-size="10.5" fill="#555">&#8594; PENDING becomes SELECTED</text>
+    <text x="1010" y="314" text-anchor="middle" font-size="10.5" fill="#555">(0,4), (1,4) are already back to AVAILABLE</text>
+    <text x="1010" y="328" text-anchor="middle" font-size="10.5" fill="#555">&#8594; nothing left to finalize for B, C this round</text>
+  </g>
+
+  <!-- ============================================================ -->
+  <!-- PANEL 3 : cx=1270 -->
+  <!-- ============================================================ -->
+  <g>
+    <text x="1270" y="72" text-anchor="middle" font-size="11" fill="#888">finalize_nonconflicting_candidates (this round)</text>
+    <text x="1270" y="92" text-anchor="middle" font-size="13.5" font-weight="700" fill="#1a1a1a">Step 3 &#8212; A&#8217;s untouched pick becomes SELECTED</text>
+
+    <path d="M1270,290 L1270,140 L1130,385 Z" fill="#22c55e" fill-opacity="0.12" stroke="#22c55e" stroke-opacity="0.4" stroke-dasharray="4 3"/>
+    <path d="M1270,290 L1130,385 L1410,385 Z" fill="#2563eb" fill-opacity="0.06" stroke="#2563eb" stroke-opacity="0.2" stroke-dasharray="4 3"/>
+    <path d="M1270,290 L1410,385 L1270,140 Z" fill="#7c3aed" fill-opacity="0.06" stroke="#7c3aed" stroke-opacity="0.2" stroke-dasharray="4 3"/>
+
+    <text x="1155" y="232" text-anchor="middle" font-size="11" font-weight="700" fill="#15803d">Tet A {0,1,2,3}</text>
+    <text x="1270" y="418" text-anchor="middle" font-size="11" font-weight="700" fill="#64748b">Tet B {0,1,3,4}</text>
+    <text x="1385" y="232" text-anchor="middle" font-size="11" font-weight="700" fill="#64748b">Tet C {0,1,2,4}</text>
+
+    <g stroke="#aaaaaa" stroke-width="2">
+      <line x1="1270" y1="273" x2="1270" y2="307"/>
+      <line x1="1270" y1="273" x2="1270" y2="140"/>
+      <line x1="1270" y1="307" x2="1270" y2="140"/>
+      <line x1="1270" y1="273" x2="1130" y2="385"/>
+      <line x1="1270" y1="307" x2="1130" y2="385"/>
+      <line x1="1130" y1="385" x2="1410" y2="385"/>
+      <line x1="1410" y1="385" x2="1270" y2="140"/>
+    </g>
+
+    <!-- A's candidate: SELECTED -->
+    <line x1="1270" y1="140" x2="1130" y2="385" stroke="#16a34a" stroke-width="6" stroke-linecap="round"/>
+    <!-- B, C candidates: plain available again -->
+    <line x1="1270" y1="307" x2="1410" y2="385" stroke="#aaaaaa" stroke-width="2"/>
+    <line x1="1270" y1="273" x2="1410" y2="385" stroke="#aaaaaa" stroke-width="2"/>
+
+    <g>
+      <circle cx="1270" cy="273" r="11" fill="#fff" stroke="#222" stroke-width="1.5"/><text x="1270" y="277" text-anchor="middle" font-size="11" font-weight="700">0</text>
+      <circle cx="1270" cy="307" r="11" fill="#fff" stroke="#222" stroke-width="1.5"/><text x="1270" y="311" text-anchor="middle" font-size="11" font-weight="700">1</text>
+      <circle cx="1270" cy="140" r="13" fill="#fff" stroke="#222" stroke-width="1.5"/><text x="1270" y="145" text-anchor="middle" font-size="12" font-weight="700">2</text>
+      <circle cx="1130" cy="385" r="13" fill="#fff" stroke="#222" stroke-width="1.5"/><text x="1130" y="390" text-anchor="middle" font-size="12" font-weight="700">3</text>
+      <circle cx="1410" cy="385" r="13" fill="#fff" stroke="#222" stroke-width="1.5"/><text x="1410" y="390" text-anchor="middle" font-size="12" font-weight="700">4</text>
+    </g>
+
+    <g font-size="12">
+      <line x1="1170" y1="440" x2="1190" y2="440" stroke="#16a34a" stroke-width="5"/>
+      <text x="1196" y="444" fill="#166534" font-weight="700">(2,3) &#8212; SELECTED &#10003;</text>
+      <line x1="1170" y1="457" x2="1190" y2="457" stroke="#aaaaaa" stroke-width="3"/>
+      <text x="1196" y="461" fill="#666">(1,4) &#8212; AVAILABLE, retry later</text>
+      <line x1="1170" y1="474" x2="1190" y2="474" stroke="#aaaaaa" stroke-width="3"/>
+      <text x="1196" y="478" fill="#666">(0,4) &#8212; AVAILABLE, retry later</text>
+    </g>
+  </g>
+
+  <!-- ===================== LEGEND ===================== -->
+  <g font-size="11" fill="#333">
+    <line x1="180" y1="498" x2="210" y2="498" stroke="#f59e0b" stroke-width="5" stroke-linecap="round"/>
+    <text x="218" y="502">Tet A&#8217;s candidate</text>
+
+    <line x1="370" y1="498" x2="400" y2="498" stroke="#2563eb" stroke-width="5" stroke-linecap="round"/>
+    <text x="408" y="502">Tet B&#8217;s candidate</text>
+
+    <line x1="560" y1="498" x2="590" y2="498" stroke="#7c3aed" stroke-width="5" stroke-linecap="round"/>
+    <text x="598" y="502">Tet C&#8217;s candidate</text>
+
+    <line x1="750" y1="498" x2="780" y2="498" stroke="#9ca3af" stroke-width="4" stroke-dasharray="7 6" stroke-linecap="round"/>
+    <text x="788" y="502">reverted this round</text>
+
+    <line x1="960" y1="498" x2="990" y2="498" stroke="#aaaaaa" stroke-width="2"/>
+    <text x="998" y="502">other AVAILABLE edges</text>
+
+    <line x1="1200" y1="498" x2="1230" y2="498" stroke="#16a34a" stroke-width="6" stroke-linecap="round"/>
+    <text x="1238" y="502">SELECTED (finalized)</text>
+  </g>
+
+  <!-- Footer -->
+  <text x="750" y="524" text-anchor="middle" font-size="11.5" fill="#444">
+    Only (2,3) survives uncontested &#8594; SELECTED for this refinement pass. (0,4) and (1,4) both touch the shared face {0,1,4}
+  </text>
+  <text x="750" y="541" text-anchor="middle" font-size="11.5" fill="#444">
+    between B and C, so neither wins this round &#8212; they return to AVAILABLE and re-enter scoring on the next conflict-resolution iteration.
+  </text>
+</svg>

@@ -82,6 +82,9 @@ class RefinementSolver(SolverBase):
         self._refine_elastic_weight = kwargs.get("refine_elastic_weight", 1.0)
         self._refine_contact_weight = kwargs.get("refine_contact_weight", 1.0)
         self._refine_tri_contact_weight = kwargs.get("refine_tri_contact_weight", 1.0)
+        # Tool-curvature factor on the contact terms: 1 + w * L * kappa, kappa
+        # from the per-particle SDF Hessian along the edge (0 = off).
+        self._refine_curvature_weight = kwargs.get("refine_curvature_weight", 0.0)
         # The geometric score is dimensionless, so it gets its own threshold
         # instead of min_refine_score (which is in the legacy score's units).
         self._refine_geometric_threshold = kwargs.get("refine_geometric_threshold", 1.0)
@@ -90,6 +93,12 @@ class RefinementSolver(SolverBase):
         self._cg_max_iterations = kwargs.get("cg_max_iterations", 1000)
         self._cg_tolerance = kwargs.get("cg_tolerance", 1.0e-6)
         self._cg_check_every = kwargs.get("cg_check_every", 0)
+        # Capture the CG iteration as a CUDA (conditional) graph. Off when the caller does not
+        # graph-capture the step, so the "no graph capture" configuration really launches
+        # every kernel. Note Warp's check_every=0 path only exits early *inside* a captured
+        # graph; without one it runs the full cg_max_iterations, so pair this with a
+        # host-side check (cg_check_every > 0).
+        self._cg_use_cuda_graph = kwargs.get("cg_use_cuda_graph", True)
         self._precond_singular_threshold = kwargs.get("preconditioner_singular_threshold", 1.0e-20)
 
         # Backtracking line search. The threshold default (1e-8) is tuned for
@@ -229,7 +238,7 @@ class RefinementSolver(SolverBase):
             maxiter=self._cg_max_iterations,
             check_every=self._cg_check_every,
             tol=self._cg_tolerance,
-            use_cuda_graph=True,
+            use_cuda_graph=self._cg_use_cuda_graph,
             M=self._precond,
             run=False,
         )
@@ -458,11 +467,13 @@ class RefinementSolver(SolverBase):
                     particle_shape_id=self._contact.shape_id,
                     tri_distance=self._contact.tri_distance if self._contact.tri_contact else None,
                     tri_bary=self._contact.tri_bary if self._contact.tri_contact else None,
+                    particle_distance_hessian=self._contact.distance_hessian,
                     contact_d1=self._contact.d1,
                     min_edge_length=self._refine_min_edge_length,
                     elastic_weight=self._refine_elastic_weight,
                     vertex_contact_weight=self._refine_contact_weight,
                     tri_contact_weight=self._refine_tri_contact_weight,
+                    curvature_weight=self._refine_curvature_weight,
                 )
             refine(
                 self.model,
@@ -981,5 +992,7 @@ class RefinementSolver(SolverBase):
 
     def write_timings(self, filename: str):
         import json
+        import os
+        os.makedirs(os.path.dirname(filename) or ".", exist_ok=True)
         with open(filename, "w") as f:
             json.dump(self._timings, f)

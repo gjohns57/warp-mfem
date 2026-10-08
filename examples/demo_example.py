@@ -1,13 +1,9 @@
+from examples.config import apply_config
 import newton
 import newton.examples
-import newton.solvers
 import numpy as np
 import nvtx
 import warp as wp
-from newton._src.viewer.gl.opengl import RendererGL
-from newton.viewer import ViewerGL, ViewerUSD
-from pxr import UsdGeom
-from pyglet.window.key import _0
 
 from mfem import MFEMSolver
 from mfem.boundary_condition import DirichletBoundaryCondition
@@ -610,4 +606,4 @@ class MFEMExample:
             default=24,
         )
 
-        return parser
+        return apply_config(parser, "demo_example")

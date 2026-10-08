@@ -14,7 +14,7 @@
   },
   {
     "adapter": "Debugpy",
-    "label": "run '/home/gabriel/auras/warp-mfem/src/mfem/refinement/sim.py'",
+    "label": "run '/home/gabriel/auras/warp-mfem/examples/refinement/soft_body_refinement.py'",
     "request": "launch",
     "python": "$ZED_CUSTOM_PYTHON_ACTIVE_ZED_TOOLCHAIN",
     "args": [],

@@ -1,11 +1,11 @@
-"""TrackedSurfaceLoss (mfem.refinement.surface_loss): the tool-exclusion mask
+"""TrackedSurfaceLoss (examples.refinement.surface_loss): the tool-exclusion mask
 and the sim-face projection of the tracked -> sim direction, on a synthetic
 flat tracked mesh so no dataset is needed."""
 
 import numpy as np
 import pytest
 
-from mfem.refinement.surface_loss import (
+from examples.refinement.surface_loss import (
     RecordingOverlay, TrackedSurfaceLoss, capsule_signed_distance, score_recording,
 )
 
@@ -117,7 +117,7 @@ def test_non_finite_sim_points_give_nan_not_crash():
 # ---------------------------------------------------------------------------
 # TrackedCorrespondenceLoss
 # ---------------------------------------------------------------------------
-from mfem.refinement.surface_loss import TrackedCorrespondenceLoss  # noqa: E402
+from examples.refinement.surface_loss import TrackedCorrespondenceLoss  # noqa: E402
 
 
 class _MovingOverlay(_FlatOverlay):

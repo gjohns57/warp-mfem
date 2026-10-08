@@ -27,18 +27,19 @@ Lagrangian error and, unlike the nearest-surface distance, it charges the sim
 for tangential motion (whole-body sliding, slip under the poker).
 ``--correspondence`` adds it to the curve as ``corr_*`` columns.
 
-Standalone, this scores a recording written by ``sim_octopus.py --record``:
+Standalone, this scores a recording written by ``octopus_refinement.py --record``:
 
-    python -m mfem.refinement.surface_loss simulation.npz
-    python -m mfem.refinement.surface_loss run.npz --tracked-surface PlushOctopus_T1/mesh_trajectories_canonical.npy --out loss.npz
+    python -m examples.refinement.surface_loss simulation.npz
+    python -m examples.refinement.surface_loss run.npz --tracked-surface PlushOctopus_T1/mesh_trajectories_canonical.npy --out loss.npz
 """
 
+from examples.config import apply_config
 import argparse
 import math
 
 import numpy as np
 
-from mfem.refinement.tracked_surface import TrackedSurfaceOverlay
+from examples.refinement.tracked_surface import TrackedSurfaceOverlay
 
 
 # ---------------------------------------------------------------------------
@@ -585,7 +586,7 @@ def merge_correspondence_row(row, corr):
 # Standalone: score a --record recording
 # ---------------------------------------------------------------------------
 class RecordingOverlay:
-    """A ``sim_octopus --record`` recording standing in for the tracked
+    """A ``octopus_refinement --record`` recording standing in for the tracked
     surface, so :class:`TrackedSurfaceLoss` can score one simulation against
     another -- typically a coarse run (with or without refinement) against a
     converged fine-mesh run of the same episode. Unlike the camera-tracked
@@ -729,7 +730,7 @@ def score_recording(rec_path, loss, *, playback_rate=1.0, corr=None):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("recording", nargs="?", default="simulation.npz",
-                    help="recording .npz from sim_octopus.py --record")
+                    help="recording .npz from octopus_refinement.py --record")
     ap.add_argument("--no-project", action="store_true",
                     help="distance to nearest tracked vertex instead of surface")
     ap.add_argument("--symmetric", action="store_true",
@@ -759,6 +760,7 @@ def main():
                          "--tracked-surface trajectory.")
     TrackedSurfaceOverlay.add_cli_args(ap)
     ap.set_defaults(tracked_surface=None)
+    apply_config(ap, "surface_loss")
     args = ap.parse_args()
 
     try:
@@ -770,7 +772,7 @@ def main():
     rec = _load_recording(args.recording)
     rec_start = rec["start_frame"]
     if args.tracked_surface is None and not args.reference:
-        from mfem.refinement.pokeflex_episodes import get_episode  # noqa: PLC0415
+        from examples.refinement.pokeflex_episodes import get_episode  # noqa: PLC0415
         try:
             args.tracked_surface = get_episode(
                 args.episode or rec["episode"]

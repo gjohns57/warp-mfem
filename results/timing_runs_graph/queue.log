@@ -1,0 +1,5 @@
+[run] gpu_graph: -g
+[run] gpu_graph exit=0 steps=150
+[run] gpu_nograph: 
+[run] gpu_nograph exit=0 steps=150
+[run] ALL DONE

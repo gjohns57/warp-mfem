@@ -30,16 +30,18 @@ out.*
 sweep_*.jsonl
 sweep_*.csv
 sweep_*.log
-sweep_*_work/*
-sweep_*_retry/
-!sweep_refine_corr_fine_geometric_work/log_norefine*.txt
-!sweep_refine_corr_fine_geometric_work/log_refine_every=10.txt
-!sweep_refine_corr_fine_geometric_work/log_refine_every=10_r?.txt
+results/sweep_*_work/*
+results/sweep_*_retry/
+!results/sweep_refine_corr_fine_geometric_work/log_norefine*.txt
+!results/sweep_refine_corr_fine_geometric_work/log_refine_every=10.txt
+!results/sweep_refine_corr_fine_geometric_work/log_refine_every=10_r?.txt
 
 # Reference / benchmark recordings
 refinement_loss_runs/
-reference_runs/*
-!reference_runs/fine_default.log
+results/media/
+results/profiling/
+results/reference_runs/*
+!results/reference_runs/fine_default.log
 reference_runs_queue*.log
 timing_runs/
 

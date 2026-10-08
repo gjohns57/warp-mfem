@@ -219,7 +219,7 @@ class TrackedSurfaceOverlay:
     def positions(self, idx):
         """Tracked vertex positions at frame ``idx`` (metres), with untracked
         vertices filled from their mesh neighbours. Public entry point for
-        consumers such as :mod:`mfem.refinement.surface_loss`."""
+        consumers such as :mod:`examples.refinement.surface_loss`."""
         return self._positions(idx)
 
     def _raw_positions(self, idx):

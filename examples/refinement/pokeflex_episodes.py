@@ -1,6 +1,6 @@
 """Per-episode configuration for the PokeFlex tracked poke scenarios.
 
-``sim_octopus.py`` and its helpers (``make_octopus_tetmesh``,
+``octopus_refinement.py`` and its helpers (``make_octopus_tetmesh``,
 ``make_octopus_rest``, ``replay_octopus``, ``sweep_octopus``) were originally
 wired to a single tracked episode, ``PlushOctopus_T1``. The PokeFlex dataset at
 ``~/Documents/PokeFlex_Tracked-mesh-episodes-and-gifs/PokeFlex_Tracked/`` ships
@@ -18,7 +18,7 @@ Values are copied from each episode's ``manifest.json`` (``T``),
 ``physics/physics_params.json`` (``E``, ``nu``, ``rho``, ``tip_r``, ``tip_len``,
 ``dyn_fit.eta``, ``lattice_dx``) and ``physics/setup_cache.npz`` (``table_y``).
 The octopus entry reproduces the old ``OCTO_*`` module constants in
-``sim_octopus.py`` verbatim, so ``--episode octopus`` (the default) is
+``octopus_refinement.py`` verbatim, so ``--episode octopus`` (the default) is
 byte-identical to the pre-refactor behaviour.
 """
 
@@ -30,7 +30,7 @@ from pathlib import Path
 import numpy as np
 
 # ``src/mfem/refinement/pokeflex_episodes.py`` -> repo root is 3 up.
-WORKSPACE_ROOT = Path(__file__).resolve().parents[3]
+WORKSPACE_ROOT = Path(__file__).resolve().parents[2]
 
 # The 4-object tool-trajectory drop unzips with a doubled directory level.
 _TOOL_TRAJ_DIR = (
@@ -56,7 +56,7 @@ TIP_LEN = 0.017289941100636492
 # Contact / table friction default. NOT identified -- the fitted tool/body and
 # body/table coefficients are both ~0.3, but at that level the free body skates
 # on the table under the laterally-sweeping tool, so the shared sim default is
-# cranked up to keep it planted (see sim_octopus --friction-mu).
+# cranked up to keep it planted (see octopus_refinement --friction-mu).
 SIM_FRICTION_MU = 0.9
 
 # Membrane-shell fabric thickness (m). A plush-fabric guess, not identified --
@@ -87,7 +87,7 @@ def _lame_from_youngs(E: float, nu: float) -> tuple[float, float]:
 
 @dataclass(frozen=True)
 class PokeflexEpisode:
-    """Everything ``sim_octopus.py`` needs that varies between tracked episodes.
+    """Everything ``octopus_refinement.py`` needs that varies between tracked episodes.
 
     Lengths in metres, PokeFlex world frame, +Y up. ``mesh_paths`` /
     ``rest_npz`` / ``stiffness_field_npz`` are workspace-relative strings so they
@@ -172,7 +172,7 @@ class PokeflexEpisode:
 
 
 # ---------------------------------------------------------------------------
-# Registry. octopus reproduces the old sim_octopus OCTO_* constants exactly.
+# Registry. octopus reproduces the old octopus_refinement OCTO_* constants exactly.
 # The three new episodes' initial_frame values are placeholders pending a
 # hand-picked "sprung back, just after the first poke" frame per episode; update
 # them here and rebuild that episode's meshes (make_octopus_tetmesh --episode X
@@ -276,7 +276,7 @@ def get_episode(spec) -> PokeflexEpisode:
 
 def _selftest() -> None:
     """Sanity-check the registry against the identified values (see the plan
-    table). Run with ``python -m mfem.refinement.pokeflex_episodes``."""
+    table). Run with ``python -m examples.refinement.pokeflex_episodes``."""
     expect = {
         "octopus": (2832.182628857769, 0.42625, 992.88, 5738.49),
         "dice": (8610.466292144307, 0.23848312501795593, 3476.21, 3170.04),

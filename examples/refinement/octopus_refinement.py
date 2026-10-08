@@ -122,6 +122,7 @@ is an IPC-style log-barrier (``--contact-d0/d1/stiffness``) rather than the
 reference's surface-traction / flat-punch contact.
 """
 
+from examples.config import apply_config
 from mfem.refinement.solver import RefinementSolver
 from mfem.refinement.refinement import edge_refinement_scores
 import newton
@@ -135,12 +136,12 @@ import math
 import ast
 import os
 from mfem.refinement.models import MFEMRefinementModel
-from mfem.refinement.tracked_surface import TrackedSurfaceOverlay
-from mfem.refinement.surface_loss import (
+from examples.refinement.tracked_surface import TrackedSurfaceOverlay
+from examples.refinement.surface_loss import (
     TrackedCorrespondenceLoss, TrackedSurfaceLoss, merge_correspondence_row,
     surface_triangles_from_tets,
 )
-from mfem.refinement.pokeflex_episodes import add_episode_arg, get_episode
+from examples.refinement.pokeflex_episodes import add_episode_arg, get_episode
 from newton import Axis
 
 import polyscope as ps
@@ -154,7 +155,7 @@ from scipy.spatial.transform import Rotation, Slerp
 # All lengths in metres, PokeFlex world frame, +Y up. T = 155 frames.
 #
 # These OCTO_* constants are now just the "octopus" entry of the per-episode
-# table in mfem.refinement.pokeflex_episodes (EPISODES["octopus"]). --episode
+# table in examples.refinement.pokeflex_episodes (EPISODES["octopus"]). --episode
 # selects a different tracked scenario (dice / turtle / tp_roll); everything
 # episode-specific is then read from the chosen PokeflexEpisode via
 # resolve_episode_defaults() / self.ep. The constants are kept for the default
@@ -291,7 +292,7 @@ _EPISODE_DERIVED_DEFAULTS = (
 def resolve_episode_defaults(args):
     """Fill any episode-derived option still at its ``None`` sentinel from
     ``args.episode`` and return the resolved
-    :class:`~mfem.refinement.pokeflex_episodes.PokeflexEpisode`."""
+    :class:`~examples.refinement.pokeflex_episodes.PokeflexEpisode`."""
     ep = get_episode(args)
     for name, getter in _EPISODE_DERIVED_DEFAULTS:
         if getattr(args, name, None) is None:
@@ -889,7 +890,7 @@ class MFEMRefinementSim:
             loss_target = self.tracked_surface
             ref_path = getattr(args, "surface_loss_reference", None)
             if ref_path:
-                from mfem.refinement.surface_loss import RecordingOverlay  # noqa: PLC0415
+                from examples.refinement.surface_loss import RecordingOverlay  # noqa: PLC0415
                 loss_target = RecordingOverlay(ref_path)
                 print(f"surface loss: scoring against reference recording {ref_path} "
                       f"({loss_target.T} frames, {loss_target.traj.shape[1]} verts)")
@@ -1723,7 +1724,7 @@ class MFEMRefinementSim:
         # distance (<0 => a particle is inside the capsule); pen_* summarise the
         # set of particles that are inside. A clean poke keeps the barrier
         # holding so capsule_gap stays ~>= 0; a run where the tool submerges
-        # drives it negative. Consumed by mfem.refinement.sweep_octopus to
+        # drives it negative. Consumed by examples.refinement.sweep_octopus to
         # penalise such runs.
         cap_d = self._capsule_signed_distances(
             self._capsule_applied_pos, self._capsule_applied_rot,
@@ -2034,14 +2035,14 @@ class MFEMRefinementSim:
             default=0.5,
         )
 
-        # Dataset surface-tracking overlay (see mfem.refinement.tracked_surface).
+        # Dataset surface-tracking overlay (see examples.refinement.tracked_surface).
         # add_cli_args defaults --tracked-surface to the octopus trajectory;
         # override to a None sentinel so resolve_episode_defaults() can point it
         # at the selected --episode's mesh_trajectories_canonical.npy instead.
         TrackedSurfaceOverlay.add_cli_args(parser)
         parser.set_defaults(tracked_surface=None)
 
-        # ---- Surface-tracking loss (mfem.refinement.surface_loss) ---------
+        # ---- Surface-tracking loss (examples.refinement.surface_loss) ---------
         parser.add_argument(
             "--surface-loss",
             help="Each frame, measure the mean squared distance from the sim "
@@ -2464,7 +2465,7 @@ class MFEMRefinementSim:
             default=5.0e-3,
         )
 
-        return parser
+        return apply_config(parser, "octopus_refinement")
 
 
 def _apply_warp_config(parser, args):
@@ -2556,7 +2557,7 @@ def init(parser):
 class _MeshRecorder:
     """Accumulate the active soft-body mesh (tet indices + vertex positions) and
     the poker pose at every rendered frame, then write them all to a single
-    ``.npz`` for offline playback with :mod:`mfem.refinement.replay_octopus`.
+    ``.npz`` for offline playback with :mod:`examples.refinement.replay_octopus`.
 
     Adaptive refinement changes the vertex / tet counts over a run, so frames
     are held in a list and only stacked into dense arrays on :meth:`close` when

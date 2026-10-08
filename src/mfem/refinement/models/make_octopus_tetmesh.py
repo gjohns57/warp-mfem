@@ -5,7 +5,7 @@ watertight surface from the fused surface tracking, run the local fTetWild build
 convert the ``.msh`` to the ``.npz`` consumed by :class:`MFEMRefinementModel`),
 but the source frame is selectable instead of hard-wired to frame 0.
 
-The default (``--frame 19``) is the frame ``sim_octopus.py`` uses as the
+The default (``--frame 19``) is the frame ``octopus_refinement.py`` uses as the
 stress-free rest state (``OCTO_INITIAL_FRAME``): the raw episode opens mid-poke
 (frames 0-12), the tool lifts off at frame 13, and by frame 19 (frame_id 20) the
 plush has finished springing back and the fused surface tracking is at its
@@ -32,7 +32,7 @@ refinement config on the coarse mesh. Coarse is unchanged; medium/full tighten.
 
 Examples
 --------
-Rebuild the three meshes sim_octopus.py's --mesh flag selects::
+Rebuild the three meshes octopus_refinement.py's --mesh flag selects::
 
     python -m mfem.refinement.models.make_octopus_tetmesh --epsr 1e-2 --tag coarse
     python -m mfem.refinement.models.make_octopus_tetmesh --epsr 5e-3 --tag medium
@@ -52,7 +52,7 @@ from pathlib import Path
 import numpy as np
 
 from mfem.refinement.models.make_tetmesh_models import convert
-from mfem.refinement.pokeflex_episodes import EPISODES, get_episode
+from examples.refinement.pokeflex_episodes import EPISODES, get_episode
 
 # ``src/mfem/refinement/models/make_octopus_tetmesh.py`` -> repo root is 4 up.
 WORKSPACE_ROOT = Path(__file__).resolve().parents[4]
@@ -198,9 +198,9 @@ def main() -> None:
                     help="rho baked into the .npz (default: the --episode's "
                          "identified rho).")
     ap.add_argument("--k-mu", type=float, default=6.0,
-                    help="placeholder Lame mu in the .npz (sim_octopus overrides).")
+                    help="placeholder Lame mu in the .npz (octopus_refinement overrides).")
     ap.add_argument("--k-lambda", type=float, default=1.0,
-                    help="placeholder Lame lambda in the .npz (sim_octopus overrides).")
+                    help="placeholder Lame lambda in the .npz (octopus_refinement overrides).")
     args = ap.parse_args()
 
     episode = get_episode(args.episode)

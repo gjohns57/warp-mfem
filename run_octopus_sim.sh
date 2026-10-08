@@ -1,4 +1,4 @@
-uv run -m mfem.refinement.sim \
+uv run -m examples.refinement.soft_body_refinement \
     --iterations 12 \
     --substeps 1 \
     --mu 5.0 \

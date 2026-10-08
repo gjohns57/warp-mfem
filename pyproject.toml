@@ -25,11 +25,9 @@ dependencies = [
     "rerun-sdk>=0.33.1",
     "usd-core>=26.5",
     "viser>=1.0.30",
+    "pyyaml>=6.0",
     "warp-lang>=1.12.1",
 ]
-# Source - https://stackoverflow.com/a/79513219
-# Posted by Moisés do Nascimento, modified by community. See post 'Timeline' for change history
-# Retrieved 2026-04-30, License - CC BY-SA 4.0
 
 
 [tool.pytest.ini_options]

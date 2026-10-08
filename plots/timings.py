@@ -1,16 +1,17 @@
 """Compare per-step solver timings between the new and old solver.
 
-Reads timings.json (new solver) and timings_old.json (old solver) — both
+Reads results/data/timings.json (new solver) and results/data/timings_old.json (old solver) — both
 written by Solver.write_timings() via warp.ScopedTimer, in milliseconds —
-and produces timings_comparison.png: a summary bar chart of median step
+and produces results/figures/timings_comparison.png: a summary bar chart of median step
 cost plus per-iteration trend lines for each step.
 
 Usage:
-    python plot_timings.py [--new timings.json] [--old timings_old.json] [--out timings_comparison.png]
+    python -m plots.timings [--new timings.json] [--old timings_old.json] [--out results/figures/timings_comparison.png]
 """
 
 import argparse
 import json
+import os
 import statistics
 
 import matplotlib.pyplot as plt
@@ -50,9 +51,9 @@ def rolling_median(values: np.ndarray, window: int) -> np.ndarray:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--new", default="timings.json")
-    parser.add_argument("--old", default="timings_old.json")
-    parser.add_argument("--out", default="timings_comparison.png")
+    parser.add_argument("--new", default="results/data/timings.json")
+    parser.add_argument("--old", default="results/data/timings_old.json")
+    parser.add_argument("--out", default="results/figures/timings_comparison.png")
     args = parser.parse_args()
 
     new = load_timings(args.new)
@@ -161,6 +162,7 @@ def main():
 
     fig.suptitle("Solver step timings: new vs. old", fontsize=14, color=TEXT_PRIMARY, y=0.98)
     fig.tight_layout(rect=(0, 0, 1, 0.96))
+    os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     fig.savefig(args.out, dpi=150)
     print(f"Wrote {args.out}")
 

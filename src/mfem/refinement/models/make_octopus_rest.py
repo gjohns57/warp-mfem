@@ -1,6 +1,6 @@
 """Estimate a stress-free **rest (reference) configuration** for the octopus.
 
-``sim_octopus.py`` loads a tetrahedralization of one tracked frame (the first
+``octopus_refinement.py`` loads a tetrahedralization of one tracked frame (the first
 tool-free frame, 13) and -- with ``--rest-shape none`` -- uses those very
 vertices as the elastic energy's zero-strain reference. But that tracked shape
 is not undeformed: it is the octopus sitting on the table under its own weight
@@ -25,18 +25,18 @@ gravity equilibrium. A handful of outer iterations drives ``x_eq`` onto
 ``x_tracked`` to well under a millimetre.
 
 The solver / material / contact configuration is pulled straight from
-``sim_octopus`` (its argument defaults + ``_refinement_solver_kwargs``), so the
+``octopus_refinement`` (its argument defaults + ``_refinement_solver_kwargs``), so the
 rest shape matches the sim it will be used in. Override any physics knob that
 you also override on the sim (``--gravity``, ``--mu``, ``--per-tet-material``,
 ``--contact-d1`` ...) so the two stay consistent.
 
 Output: ``models/octopus_rest_<mesh>.npz`` with ``rest_particles`` (n, 3), a
 copy of ``tet_indices``, and the settings it was built with. Load it via
-``sim_octopus.py --rest-shape auto`` (or ``--rest-shape <path>``).
+``octopus_refinement.py --rest-shape auto`` (or ``--rest-shape <path>``).
 
 Examples
 --------
-Coarse mesh, all defaults (matches ``sim_octopus.py`` defaults)::
+Coarse mesh, all defaults (matches ``octopus_refinement.py`` defaults)::
 
     python -m mfem.refinement.models.make_octopus_rest --mesh coarse
 
@@ -59,14 +59,14 @@ import newton
 
 from mfem.refinement.models import MFEMRefinementModel
 from mfem.refinement.solver import RefinementSolver
-from mfem.refinement import sim_octopus as so
-from mfem.refinement.pokeflex_episodes import EPISODES, get_episode
+from examples.refinement import octopus_refinement as so
+from examples.refinement.pokeflex_episodes import EPISODES, get_episode
 
 # ``src/mfem/refinement/models/make_octopus_rest.py`` -> repo root is 4 up.
 WORKSPACE_ROOT = Path(__file__).resolve().parents[4]
 
 # Physics knobs that must agree with the sim the rest shape is used in. Each is
-# forwarded onto the sim_octopus argument namespace before the solver is built.
+# forwarded onto the octopus_refinement argument namespace before the solver is built.
 # ``episode`` selects the identified material / table height / mesh set.
 _SIM_OVERRIDE_KEYS = (
     "episode",
@@ -101,7 +101,7 @@ def _rigid_align(src: np.ndarray, dst: np.ndarray) -> np.ndarray:
 
 
 def _sim_args(overrides: dict):
-    """A fully-populated ``sim_octopus`` argument namespace (all its defaults)
+    """A fully-populated ``octopus_refinement`` argument namespace (all its defaults)
     with ``overrides`` applied -- so ``_refinement_solver_kwargs`` and
     ``_load_sim_model_world_frame`` see exactly what the sim would."""
     parser = so.MFEMRefinementSim.create_parser()
@@ -215,12 +215,12 @@ def main() -> None:
     )
     ap.add_argument("--episode", choices=tuple(EPISODES), default="octopus",
                     help="which PokeFlex tracked episode to build a rest shape "
-                         "for (default octopus; same choices as sim_octopus "
+                         "for (default octopus; same choices as octopus_refinement "
                          "--episode).")
     ap.add_argument("--mesh", choices=tuple(so.OCTO_MESH_PATHS),
                     default=so.OCTO_MESH_DEFAULT,
                     help="which initial tet mesh to build a rest shape for "
-                         "(same choices as sim_octopus --mesh).")
+                         "(same choices as octopus_refinement --mesh).")
     ap.add_argument("--out", type=Path, default=None,
                     help="output .npz (default "
                          "models/<episode>_rest_<mesh>.npz).")
@@ -254,7 +254,7 @@ def main() -> None:
     ap.add_argument("--verbose-settle", action="store_true",
                     help="print the settle residual as it converges.")
 
-    # Physics knobs mirrored from sim_octopus (override the ones you also
+    # Physics knobs mirrored from octopus_refinement (override the ones you also
     # override on the sim so the rest shape is consistent with it).
     ap.add_argument("--gravity", type=float, default=None)
     ap.add_argument("--mu", type=float, default=None)
@@ -388,7 +388,7 @@ def main() -> None:
         f"  rest reference vs tracked shape: median "
         f"{np.median(drift) * 1e3:.2f} mm / max {drift.max() * 1e3:.2f} mm  "
         f"(this is the gravity sag + poke dent removed from the rest pose)\n"
-        f"  use it with:  python -m mfem.refinement.sim_octopus "
+        f"  use it with:  python -m examples.refinement.octopus_refinement "
         f"--episode {episode.key} --mesh {args.mesh} --rest-shape auto"
     )
 

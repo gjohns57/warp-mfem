@@ -53,7 +53,7 @@ import sys
 import warp as wp
 import newton
 
-from mfem.refinement.sim import MFEMRefinementModel, load_sim_model
+from examples.refinement.soft_body_refinement import MFEMRefinementModel, load_sim_model
 from mfem.refinement.solver import RefinementSolver
 
 

@@ -1,3 +1,4 @@
+from examples.config import apply_config
 from mfem.refinement.solver import RefinementSolver
 from mfem.refinement.refinement import edge_refinement_scores
 import newton
@@ -1615,7 +1616,7 @@ class MFEMRefinementSim:
                  "mesh, so this is a separate thin-radius curve-network overlay instead.",
         )
 
-        return parser
+        return apply_config(parser, "soft_body_refinement")
 
 
 def _apply_warp_config(parser, args):

@@ -1,6 +1,6 @@
-"""Parameter sweep for ``sim_octopus.py``, scored by the surface-tracking loss.
+"""Parameter sweep for ``octopus_refinement.py``, scored by the surface-tracking loss.
 
-Each trial runs a short headless ``sim_octopus`` record (``--record-frames``)
+Each trial runs a short headless ``octopus_refinement`` record (``--record-frames``)
 with ``--surface-loss`` and a set of CLI overrides, then reads the per-frame loss
 curve back from ``--surface-loss-out`` and reduces it to one scalar objective
 (default: the frame-mean MSE, in m^2, matching the sim's own summary line).
@@ -41,7 +41,7 @@ space.json``.
 
 The built-in default is built around the hand-run baseline
 
-    sim_octopus --iterations 12 --substeps 3 -gplr --record
+    octopus_refinement --iterations 12 --substeps 3 -gplr --record
                 --energy neohookean --mesh coarse
 
 ``BASE_ARGS`` pins ``-g -p -l -r``, neo-Hookean and the coarse mesh on every
@@ -56,12 +56,13 @@ Results stream to ``--out`` as JSON lines (one per trial, written as it
 finishes, so the sweep resumes / is inspectable mid-run) and a sorted CSV is
 written next to it at the end.
 
-    python -m mfem.refinement.sweep_octopus --frames 45 --passes 2
-    python -m mfem.refinement.sweep_octopus --strategy random --trials 60 --jobs 1
-    python -m mfem.refinement.sweep_octopus --space my_space.json --strategy grid
-    python -m mfem.refinement.sweep_octopus --dry-run          # just print the plan
+    python -m examples.refinement.sweep_octopus --frames 45 --passes 2
+    python -m examples.refinement.sweep_octopus --strategy random --trials 60 --jobs 1
+    python -m examples.refinement.sweep_octopus --space my_space.json --strategy grid
+    python -m examples.refinement.sweep_octopus --dry-run          # just print the plan
 """
 
+from examples.config import apply_config
 import argparse
 import concurrent.futures
 import itertools
@@ -75,14 +76,14 @@ import time
 
 import numpy as np
 
-from mfem.refinement.pokeflex_episodes import EPISODES
+from examples.refinement.pokeflex_episodes import EPISODES
 
 
 # --------------------------------------------------------------------------
 # Default search space -- edit here or pass --space space.json
 # --------------------------------------------------------------------------
 # Baseline this sweep is built around (the invocation the user runs by hand):
-#   sim_octopus --iterations 12 --substeps 3 -gplr --record
+#   octopus_refinement --iterations 12 --substeps 3 -gplr --record
 #               --energy neohookean --mesh coarse
 # so BASE_ARGS pins -g/-p/-l/-r + neohookean + coarse, and the space varies the
 # solver-convergence, contact-barrier, refinement and line-search knobs (their
@@ -163,6 +164,9 @@ REFINE_GEOMETRIC_SPACE = {
     "refine_contact_weight": {
         "flag": "--refine-contact-weight", "values": [0.0, 1.0, 2.0],
     },
+    "refine_curvature_weight": {
+        "flag": "--refine-curvature-weight", "values": [0.0, 1.0, 2.0],
+    },
 }
 # Legacy-scoring knobs (--space refine-legacy).
 REFINE_LEGACY_SPACE = {
@@ -185,7 +189,7 @@ CONSTRAINTS = [
      "contact_d0 < contact_d1"),
 ]
 
-# Which PokeFlex episode every trial simulates (sim_octopus --episode). Set from
+# Which PokeFlex episode every trial simulates (octopus_refinement --episode). Set from
 # --episode in main().
 EPISODE = "octopus"
 
@@ -228,7 +232,7 @@ EXCLUDE_TOOL_MARGIN_M = 0.01
 # nearest-surface distances, also sees sliding / tangential slip.
 OBJECTIVES = ("symmetric_mse", "tracked_to_sim_mse", "corr_mse", "mean_mse", "mean_rmse_mm",
               "median_rmse_mm", "max_rmse_mm", "last_rmse_mm")
-# Tool-submersion penalty. sim_octopus writes per-frame `capsule_gap` (min
+# Tool-submersion penalty. octopus_refinement writes per-frame `capsule_gap` (min
 # signed distance from a soft-body particle to the poker capsule surface, m;
 # negative => the tool has sunk into the mesh). Depth past PEN_TOL_M is charged
 # to the objective with weight PEN_WEIGHT, in units matching the objective:
@@ -324,7 +328,7 @@ def _parse_summary_line(text):
 def build_argv(overrides, frames, extra, *, no_refine=False):
     """``no_refine=True`` drops the -r switch: the no-remeshing reference every
     refinement setting has to beat."""
-    argv = [sys.executable, "-m", "mfem.refinement.sim_octopus",
+    argv = [sys.executable, "-m", "examples.refinement.octopus_refinement",
             "--episode", EPISODE,
             "--record-frames", str(int(frames))]
     argv += [a for a in BASE_ARGS if not (no_refine and a == "-r")]
@@ -710,7 +714,7 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--episode", choices=tuple(EPISODES), default="octopus",
                     help="which PokeFlex episode every trial simulates "
-                         "(sim_octopus --episode; default octopus).")
+                         "(octopus_refinement --episode; default octopus).")
     ap.add_argument("--strategy", choices=("coordinate", "random", "grid"),
                     default="coordinate")
     ap.add_argument("--frames", type=int, default=45,
@@ -749,13 +753,13 @@ def main():
                     help="parallel trials (GPU-bound; 1 is usually right)")
     ap.add_argument("--timeout", type=float, default=900.0,
                     help="per-trial wall-clock limit, seconds")
-    ap.add_argument("--out", default="sweep_results.jsonl",
+    ap.add_argument("--out", default="results/sweep_results.jsonl",
                     help="JSON-lines result log (appended; resumes)")
     ap.add_argument("--workdir", default=None,
                     help="scratch dir for per-trial npz/logs "
                          "(default: <out>_work/)")
     ap.add_argument("--sim-arg", action="append", default=[],
-                    help="extra literal arg forwarded to sim_octopus, appended "
+                    help="extra literal arg forwarded to octopus_refinement, appended "
                          "after BASE_ARGS and before the swept overrides "
                          "(repeatable), e.g. --sim-arg --gravity --sim-arg 0")
     ap.add_argument("--tool-pen-weight", type=float, default=PEN_WEIGHT,
@@ -767,6 +771,7 @@ def main():
                          "as submerged; only depth past this is penalised.")
     ap.add_argument("--dry-run", action="store_true",
                     help="print the planned trials and exit")
+    apply_config(ap, "sweep_octopus")
     args = ap.parse_args()
 
     EPISODE = args.episode

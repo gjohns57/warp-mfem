@@ -46,6 +46,20 @@ class RefinementBuffers:
         self.tri_candidate = wp.full(max_tris, wp.vec2i(-1, -1), dtype=wp.vec2i)
         self.tri_split_counts = wp.zeros(max_tris + 1, dtype=wp.int32)
 
+        # Snapshot of the candidate hashmap taken right after the scoring pass
+        # (see refine() below), before conflict resolution/count_and_scan_splits
+        # clear keys and repurpose candidate_hashmap_scores' memory as an index
+        # buffer. Lets callers recover the raw per-edge score of every edge in
+        # the mesh (not just the finalized split winners) for debug
+        # visualization -- see edge_refinement_scores() / sim*.py render().
+        self.candidate_hashmap_keys_snapshot = wp.zeros(self.candidate_hashmap_size, dtype=wp.uint64)
+        self.candidate_hashmap_scores_snapshot = wp.zeros(self.candidate_hashmap_size, dtype=wp.float32)
+        # Scratch for edge_refinement_scores(): every active tet's 6 edges and
+        # their looked-up score, flattened by the caller into a curve-network
+        # overlay (duplicate edges shared between tets carry the same score).
+        self.edge_score_edges = wp.zeros((max_tets, 6), dtype=wp.vec2i)
+        self.edge_score_values = wp.zeros((max_tets, 6), dtype=wp.float32)
+
 @wp.func
 def edge_to_key(edge: wp.vec2i) -> wp.uint64:
     return wp.cast(wp.vec2i(wp.min(*edge), wp.max(*edge)), dtype=wp.uint64)
@@ -144,6 +158,19 @@ def populate_candidates(
 #   s_contact    contact proximity (d1 - d) / d1: 0 outside the barrier range,
 #                1 at the surface, > 1 when penetrating -- so penetration is
 #                still prioritised without a separate override
+#   curvature    optional (curvature_weight > 0): the contact terms are scaled
+#                by 1 + w_k * L * kappa, where kappa = t^T H t is the normal
+#                curvature of the nearest rigid shape's distance field along
+#                the edge direction t (H = per-particle SDF Hessian, max over
+#                the two endpoints). L * kappa is the angle the edge subtends
+#                on the tool; a straight edge pressed onto a surface of
+#                curvature kappa sags L^2 kappa / 8 below it at its midpoint,
+#                so with h_min = d1 the product (L / h_min) * (L * kappa) is
+#                that sag in units of the barrier range -- i.e. the edges that
+#                can pass through the tool between two barrier-guarded
+#                vertices are the ones that split. The capsule Hessian is
+#                (I - nn^T) / rho: 1/rho across the axis, 0 along it, and the
+#                plane's is 0, so table contact never drives curvature splits.
 #
 # Contact is taken from the tri-contact data the solver already computes: a
 # surface tri within d1 of the tool scores its edges by proximity times
@@ -158,6 +185,26 @@ def populate_candidates(
 def contact_proximity(d: wp.float32, d1: wp.float32) -> wp.float32:
     """0 outside the barrier range, 1 at the surface, > 1 when penetrating."""
     return wp.max((d1 - d) / d1, wp.float32(0.0))
+
+
+@wp.func
+def edge_tool_curvature(
+    particle_distance_hessian: wp.array[wp.mat33],
+    particle_q: wp.array[wp.vec3],
+    edge: wp.vec2i,
+) -> wp.float32:
+    """Normal curvature of the nearest rigid shape along the edge direction,
+    t^T H t with H the per-particle SDF Hessian, max over the two endpoints
+    (clamped >= 0). Times the edge length this is the angle the edge subtends
+    on the tool."""
+    d = particle_q[edge[1]] - particle_q[edge[0]]
+    L = wp.length(d)
+    if L <= 0.0:
+        return wp.float32(0.0)
+    t = d / L
+    k0 = wp.dot(t, particle_distance_hessian[edge[0]] * t)
+    k1 = wp.dot(t, particle_distance_hessian[edge[1]] * t)
+    return wp.max(wp.max(k0, k1), wp.float32(0.0))
 
 
 @wp.func
@@ -203,11 +250,13 @@ def populate_candidates_geometric(
     particle_q: wp.array[wp.vec3],
     particle_distance: wp.array[wp.float32],
     particle_shape_id: wp.array[wp.int32],
+    particle_distance_hessian: wp.array[wp.mat33],
     shape_type: wp.array[wp.int32],
     contact_d1: wp.float32,
     min_edge_length: wp.float32,
     elastic_weight: wp.float32,
     vertex_contact_weight: wp.float32,
+    curvature_weight: wp.float32,
     elastic_stats: wp.array[wp.float32],
     candidate_hashmap_size: wp.int32,
     candidate_hashmap_keys: wp.array[wp.uint64],
@@ -250,6 +299,10 @@ def populate_candidates_geometric(
                         if sid >= 0:
                             if shape_type[sid] == GeoType.CAPSULE:
                                 s_contact = wp.max(s_contact, contact_proximity(particle_distance[v], contact_d1))
+                    if s_contact > 0.0 and curvature_weight > 0.0:
+                        s_contact = s_contact * (
+                            1.0 + curvature_weight * L * edge_tool_curvature(particle_distance_hessian, particle_q, edge)
+                        )
                     score = (L / min_edge_length) * (L / l_max) * (
                         elastic_weight * s_elastic + vertex_contact_weight * s_contact
                     )
@@ -264,9 +317,11 @@ def populate_tri_candidates_geometric(
     particle_q: wp.array[wp.vec3],
     tri_distance: wp.array[wp.float32],
     tri_bary: wp.array[wp.vec3],
+    particle_distance_hessian: wp.array[wp.mat33],
     contact_d1: wp.float32,
     min_edge_length: wp.float32,
     tri_contact_weight: wp.float32,
+    curvature_weight: wp.float32,
     candidate_hashmap_size: wp.int32,
     candidate_hashmap_keys: wp.array[wp.uint64],
     candidate_hashmap_scores: wp.array[wp.float32],
@@ -312,7 +367,10 @@ def populate_tri_candidates_geometric(
                 if candidate_hashmap_keys[index] == key:
                     # 1 when the closest point lies on this edge, 2/3 at the centroid.
                     w = 1.0 - bary[k]
-                    score = (L / min_edge_length) * (L / l_max) * tri_contact_weight * prox * w
+                    curv = wp.float32(1.0)
+                    if curvature_weight > 0.0:
+                        curv = 1.0 + curvature_weight * L * edge_tool_curvature(particle_distance_hessian, particle_q, edge)
+                    score = (L / min_edge_length) * (L / l_max) * tri_contact_weight * prox * w * curv
                     wp.atomic_max(candidate_hashmap_scores, index, score)
 
 
@@ -911,6 +969,75 @@ def scatter_tris(
         new_tri_indices[tri_index_map[tid] + i, split_edge_index[i]] = new_vertex_index
 
 
+@wp.kernel
+def gather_tet_edge_scores(
+    active_tet_count: wp.array[wp.int32],
+    tet_indices: wp.array2d[wp.int32],
+    candidate_hashmap_size: wp.int32,
+    candidate_hashmap_keys: wp.array[wp.uint64],
+    candidate_hashmap_scores: wp.array[wp.float32],
+    edges: wp.array2d[wp.vec2i],
+    edge_scores: wp.array2d[wp.float32],
+):
+    """For every active tet, look up each of its 6 edges in a (keys, scores)
+    snapshot from refine()'s scoring pass and write out the edge + its score.
+    Used to build a debug curve-network overlay colored by refinement score
+    (see edge_refinement_scores() and soft_body_refinement.py / octopus_refinement.py render())."""
+    tid = wp.tid()
+    if tid >= active_tet_count[0]:
+        for k in range(6):
+            edges[tid, k] = wp.vec2i(0, 0)
+            edge_scores[tid, k] = 0.0
+        return
+
+    k = int(0)
+    for i in range(4):
+        for j in range(i):
+            edge = wp.vec2i(tet_indices[tid, i], tet_indices[tid, j])
+            key = edge_to_key(edge)
+            index = hashtable_find(candidate_hashmap_keys, candidate_hashmap_size, key, wp.uint64(0))
+            score = wp.float32(0.0)
+            if candidate_hashmap_keys[index] == key:
+                score = candidate_hashmap_scores[index]
+            edges[tid, k] = edge
+            edge_scores[tid, k] = score
+            k += 1
+
+
+def edge_refinement_scores(additional_state: AdditionalState, refinement_buffers: RefinementBuffers):
+    """Per-edge refinement score of every edge in the current mesh, from the
+    most recent refine() call's scoring pass (populate_candidates /
+    populate_candidates_geometric + populate_tri_candidates_geometric).
+
+    Returns ``(edges, scores)`` as ``(6 * active_tet_count, 2)`` int32 and
+    ``(6 * active_tet_count,)`` float32 numpy arrays -- edges shared between
+    tets are repeated with the same score, which is harmless for a debug
+    curve-network overlay (see soft_body_refinement.py / octopus_refinement.py render()).
+
+    Only meaningful when refinement is enabled and refine() has run at least
+    once; otherwise the snapshot buffers are still their zero-init value.
+    """
+    wp.launch(
+        gather_tet_edge_scores,
+        dim=refinement_buffers.max_tets,
+        inputs=[
+            additional_state.active_tet_count,
+            additional_state.tet_indices,
+            refinement_buffers.candidate_hashmap_size,
+            refinement_buffers.candidate_hashmap_keys_snapshot,
+            refinement_buffers.candidate_hashmap_scores_snapshot,
+        ],
+        outputs=[
+            refinement_buffers.edge_score_edges,
+            refinement_buffers.edge_score_values,
+        ],
+    )
+    tet_count = int(additional_state.active_tet_count.numpy()[0])
+    edges = refinement_buffers.edge_score_edges.numpy()[:tet_count].reshape(-1, 2)
+    scores = refinement_buffers.edge_score_values.numpy()[:tet_count].reshape(-1)
+    return edges, scores
+
+
 def refine(
     model: Model,
     density: float,
@@ -931,11 +1058,13 @@ def refine(
     particle_shape_id: wp.array | None = None,
     tri_distance: wp.array | None = None,
     tri_bary: wp.array | None = None,
+    particle_distance_hessian: wp.array | None = None,
     contact_d1: float = 0.0,
     min_edge_length: float = 0.0,
     elastic_weight: float = 1.0,
     vertex_contact_weight: float = 1.0,
     tri_contact_weight: float = 1.0,
+    curvature_weight: float = 0.0,
     refine_every: int = 1,
 ):
     """Split edges of ``additional_state_in`` into ``additional_state_out``.
@@ -956,6 +1085,9 @@ def refine(
       tri term, ``tri_distance`` / ``tri_bary``, all evaluated at
       ``state_in``; ``contact_d1`` is the barrier range and
       ``min_edge_length`` the shortest edge the refinement may create.
+      With ``curvature_weight > 0`` the contact terms are scaled by
+      ``1 + curvature_weight * L * kappa`` (tool curvature along the edge,
+      from ``particle_distance_hessian`` = Contact.distance_hessian).
     """
 
     refinement_buffers.candidate_hashmap_keys.zero_()
@@ -996,6 +1128,8 @@ def refine(
             raise ValueError("scoring='geometric' needs particle_distance and particle_shape_id")
         if min_edge_length <= 0.0 or contact_d1 <= 0.0:
             raise ValueError("scoring='geometric' needs min_edge_length > 0 and contact_d1 > 0")
+        if particle_distance_hessian is None:
+            raise ValueError("scoring='geometric' needs particle_distance_hessian (Contact.distance_hessian)")
         refinement_buffers.elastic_density_stats.zero_()
         wp.launch(
             elastic_density_stats,
@@ -1021,11 +1155,13 @@ def refine(
                 state_in.particle_q,
                 particle_distance,
                 particle_shape_id,
+                particle_distance_hessian,
                 model.shape_type,
                 float(contact_d1),
                 float(min_edge_length),
                 float(elastic_weight),
                 float(vertex_contact_weight),
+                float(curvature_weight),
                 refinement_buffers.elastic_density_stats,
                 refinement_buffers.candidate_hashmap_size,
             ],
@@ -1045,9 +1181,11 @@ def refine(
                     state_in.particle_q,
                     tri_distance,
                     tri_bary,
+                    particle_distance_hessian,
                     float(contact_d1),
                     float(min_edge_length),
                     float(tri_contact_weight),
+                    float(curvature_weight),
                     refinement_buffers.candidate_hashmap_size,
                 ],
                 outputs=[
@@ -1057,6 +1195,12 @@ def refine(
             )
     else:
         raise ValueError(f"Unknown refinement scoring {scoring!r} (expected 'legacy' or 'geometric')")
+
+    # Snapshot the raw per-edge scores before count_and_scan_splits() below
+    # clears candidate_hashmap_keys and reinterprets candidate_hashmap_scores'
+    # memory as an index buffer -- see edge_refinement_scores().
+    wp.copy(refinement_buffers.candidate_hashmap_keys_snapshot, refinement_buffers.candidate_hashmap_keys)
+    wp.copy(refinement_buffers.candidate_hashmap_scores_snapshot, refinement_buffers.candidate_hashmap_scores)
 
     wp.launch(
         get_tet_candidate,

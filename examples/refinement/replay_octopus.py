@@ -1,6 +1,6 @@
-"""Replay a mesh recording written by ``sim_octopus.py --record``.
+"""Replay a mesh recording written by ``octopus_refinement.py --record``.
 
-``sim_octopus.py --record run.npz`` dumps, for every rendered frame, the active
+``octopus_refinement.py --record run.npz`` dumps, for every rendered frame, the active
 soft-body tet mesh (vertex positions + tet indices) and the poker capsule
 transform. This script loads that ``.npz`` back into a polyscope window and
 plays it as an animation -- no solver, no Warp, just the recorded geometry.
@@ -8,8 +8,8 @@ Only the boundary surface of the tet mesh is drawn (recovered per topology
 with ``surface_triangles_from_tets``); pass ``--show-tets`` to draw the full
 volume mesh instead.
 
-    python -m mfem.refinement.replay_octopus run.npz
-    python -m mfem.refinement.replay_octopus run.npz --fps 15 --paused
+    python -m examples.refinement.replay_octopus run.npz
+    python -m examples.refinement.replay_octopus run.npz --fps 15 --paused
 
 Recording layout (keys in the ``.npz``)
 --------------------------------------
@@ -32,6 +32,7 @@ on load); ``tet_indices`` is a single ``(M, 4)`` array when the topology never
 changed.
 """
 
+from examples.config import apply_config
 import argparse
 import math
 
@@ -40,9 +41,9 @@ import polyscope as ps
 import polyscope.imgui as psim
 from scipy.spatial.transform import Rotation
 
-from mfem.refinement.tracked_surface import TrackedSurfaceOverlay
-from mfem.refinement.surface_loss import TrackedSurfaceLoss, surface_triangles_from_tets
-from mfem.refinement.pokeflex_episodes import get_episode
+from examples.refinement.tracked_surface import TrackedSurfaceOverlay
+from examples.refinement.surface_loss import TrackedSurfaceLoss, surface_triangles_from_tets
+from examples.refinement.pokeflex_episodes import get_episode
 
 
 def _load(path):
@@ -83,7 +84,7 @@ def _load(path):
 
 def _capsule_nodes(xform7, half_height):
     """The two capsule cap centres in world space (capsule long axis is local +Z,
-    matching ``sim_octopus``)."""
+    matching ``octopus_refinement``)."""
     pos = np.asarray(xform7[:3], dtype=np.float64)
     rot = Rotation.from_quat(xform7[3:7]).as_matrix()
     axis = rot[:, 2] * half_height
@@ -92,7 +93,7 @@ def _capsule_nodes(xform7, half_height):
 
 def _frame_camera(pts, *, fill_fraction=0.7, view_dir=(1.0, -0.5, 1.0)):
     """Aim the camera at ``pts`` and back it off so the body fills the view
-    (a trimmed copy of ``sim_octopus.frame_camera_on_soft_body``)."""
+    (a trimmed copy of ``octopus_refinement.frame_camera_on_soft_body``)."""
     lo, hi = pts.min(axis=0), pts.max(axis=0)
     center = 0.5 * (lo + hi)
     radius = max(0.5 * float(np.linalg.norm(hi - lo)), 1e-6)
@@ -274,7 +275,7 @@ def create_parser():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument(
         "path", nargs="?", default="simulation.npz",
-        help="recording .npz written by sim_octopus.py --record (default: simulation.npz)",
+        help="recording .npz written by octopus_refinement.py --record (default: simulation.npz)",
     )
     parser.add_argument(
         "--fps", type=float, default=None,
@@ -297,13 +298,13 @@ def create_parser():
              "key stored in the .npz, else octopus). Only used to pick the "
              "default --tracked-surface trajectory.",
     )
-    # Dataset surface-tracking overlay (see mfem.refinement.tracked_surface).
+    # Dataset surface-tracking overlay (see examples.refinement.tracked_surface).
     # Default --tracked-surface to a None sentinel so main() can resolve it from
     # the recording's episode.
     TrackedSurfaceOverlay.add_cli_args(parser)
     parser.set_defaults(tracked_surface=None)
 
-    # Surface-tracking loss (see mfem.refinement.surface_loss).
+    # Surface-tracking loss (see examples.refinement.surface_loss).
     parser.add_argument(
         "--surface-loss", action="store_true",
         help="Score each replayed frame's surface against the nearest point on "
@@ -325,7 +326,7 @@ def create_parser():
         "--surface-loss-out", type=str, default=None,
         help="After the window closes, write the per-frame loss curve to this .npz.",
     )
-    return parser
+    return apply_config(parser, "replay_octopus")
 
 
 def main():
