@@ -1,0 +1,234 @@
+/home/gabriel/auras/warp-mfem/.venv/bin/python3 -m mfem.refinement.sim_octopus --episode octopus --record-frames 150 --quiet --headless -g -p -l --energy neohookean --mesh coarse --surface-loss --surface-loss-every 100000 --tracked-surface-detrend rigid --tracked-surface-alpha 0.0 --surface-loss-symmetric --surface-loss-correspondence --bail-unstable --refine-scoring geometric --surface-loss-reference reference_runs/fine_default.npz --surface-loss-out sweep_refine_corr_fine_geometric_work/loss_norefine_r1.npz --record sweep_refine_corr_fine_geometric_work/rec_norefine_r1.npz
+
+[polyscope] Backend: openGL_mock
+Warp 1.15.0 initialized:
+   CUDA Toolkit 12.9, Driver 13.2
+   Devices:
+     "cpu"      : "x86_64"
+     "cuda:0"   : "NVIDIA GeForce RTX 4060 Laptop GPU" (8 GiB, sm_89, mempool enabled)
+   Kernel cache:
+     /home/gabriel/.cache/warp/1.15.0
+episode octopus: --mesh coarse -> models/octopus_initial_coarse.npz
+--rest-shape: loaded models/octopus_rest_coarse.npz  (rest reference vs tracked start: median 2.14 mm / max 9.40 mm)
+tool path retracted 3.4 mm along -tool-axis so the poker starts 0 mm clear of the start-frame mesh
+tool trajectory: 155 frames, 5.13 s, start frame = 19 (t0 = 0.633 s, tool-free), origin span (mm) = [ 54.3 106.8 150. ], contact frames = 123, playback x1, verbatim
+per-tet material 'field' (E_field) transferred from models/octopus_stiffness_field.npz: 3450 id tets -> 2025 coarse tets, nearest-centroid dist mean 6.5 mm / max 16.3 mm; E (Pa) min 1651 / med 2832 / max 3633, nu 0.4263 -> mu (Pa) 579..1274, lambda (Pa) 3345..7362
+tracked surface: whole-body detrend = rigid (reference frame 19)
+tracked surface overlay: 155 frames, 15002 verts, 30000 tris, alpha 0  (/home/gabriel/auras/warp-mfem/PlushOctopus_T1/mesh_trajectories_canonical.npy)
+surface loss: scoring against reference recording reference_runs/fine_default.npz (150 frames, 6431 verts)
+[correspondence] bound 442 surface vertices to tracked frame 0 (bind residual RMS 2.16 mm, max 6.57 mm, unbound 0)
+Update system took 4.48 ms
+Assemble system took 11.83 ms
+Global solve took 29.36 ms
+Local solve took 0.24 ms
+Line search took 8.52 ms
+Update system took 0.60 ms
+Assemble system took 1.62 ms
+Global solve took 0.90 ms
+Local solve took 0.04 ms
+Line search took 2.19 ms
+Update system took 0.48 ms
+Assemble system took 1.45 ms
+Global solve took 0.80 ms
+Local solve took 0.03 ms
+Line search took 2.11 ms
+Update system took 0.43 ms
+Assemble system took 1.53 ms
+Global solve took 0.75 ms
+Local solve took 0.03 ms
+Line search took 2.16 ms
+Update system took 0.43 ms
+Assemble system took 1.44 ms
+Global solve took 0.78 ms
+Local solve took 0.03 ms
+Line search took 2.19 ms
+Update system took 0.54 ms
+Assemble system took 1.42 ms
+Global solve took 0.80 ms
+Local solve took 0.06 ms
+Line search took 2.16 ms
+Update system took 0.41 ms
+Assemble system took 1.45 ms
+Global solve took 0.76 ms
+Local solve took 0.03 ms
+Line search took 2.21 ms
+Update system took 0.41 ms
+Assemble system took 1.42 ms
+Global solve took 0.81 ms
+Local solve took 0.04 ms
+Line search took 2.21 ms
+Update system took 0.43 ms
+Assemble system took 1.41 ms
+Global solve took 0.83 ms
+Local solve took 0.03 ms
+Line search took 2.23 ms
+Update system took 0.41 ms
+Assemble system took 1.45 ms
+Global solve took 0.98 ms
+Local solve took 0.05 ms
+Line search took 2.35 ms
+Update system took 0.47 ms
+Assemble system took 1.48 ms
+Global solve took 0.85 ms
+Local solve took 0.03 ms
+Line search took 2.30 ms
+Update system took 0.44 ms
+Assemble system took 1.38 ms
+Global solve took 0.86 ms
+Local solve took 0.03 ms
+Line search took 2.30 ms
+Step and readback took 172.01 ms
+Step and readback took 135.16 ms
+Step and readback took 98.46 ms
+Step and readback took 92.91 ms
+Step and readback took 91.24 ms
+Step and readback took 90.55 ms
+Step and readback took 90.88 ms
+Step and readback took 112.17 ms
+Step and readback took 126.16 ms
+Step and readback took 90.31 ms
+Step and readback took 94.38 ms
+Step and readback took 102.71 ms
+Step and readback took 114.78 ms
+Step and readback took 113.16 ms
+Step and readback took 111.24 ms
+Step and readback took 113.19 ms
+Step and readback took 122.53 ms
+Step and readback took 107.78 ms
+Step and readback took 110.42 ms
+Step and readback took 102.92 ms
+Step and readback took 99.36 ms
+Step and readback took 100.99 ms
+Step and readback took 99.91 ms
+Step and readback took 97.08 ms
+Step and readback took 98.55 ms
+Step and readback took 100.02 ms
+Step and readback took 99.87 ms
+Step and readback took 108.21 ms
+Step and readback took 102.21 ms
+Step and readback took 103.77 ms
+Step and readback took 102.69 ms
+Step and readback took 105.16 ms
+Step and readback took 107.66 ms
+Step and readback took 112.41 ms
+Step and readback took 107.70 ms
+Step and readback took 107.77 ms
+Step and readback took 94.98 ms
+Step and readback took 109.95 ms
+Step and readback took 89.81 ms
+Step and readback took 101.57 ms
+Step and readback took 113.11 ms
+Step and readback took 89.64 ms
+Step and readback took 91.64 ms
+Step and readback took 111.13 ms
+Step and readback took 94.20 ms
+Step and readback took 115.27 ms
+Step and readback took 121.38 ms
+Step and readback took 116.87 ms
+Step and readback took 105.01 ms
+Step and readback took 111.53 ms
+Step and readback took 102.48 ms
+Step and readback took 104.03 ms
+Step and readback took 248.93 ms
+Step and readback took 100.08 ms
+Step and readback took 105.17 ms
+Step and readback took 121.30 ms
+Step and readback took 115.49 ms
+Step and readback took 106.90 ms
+Step and readback took 97.74 ms
+Step and readback took 102.68 ms
+Step and readback took 95.15 ms
+Step and readback took 101.54 ms
+Step and readback took 104.85 ms
+Step and readback took 99.44 ms
+Step and readback took 108.68 ms
+Step and readback took 106.19 ms
+Step and readback took 110.10 ms
+Step and readback took 129.05 ms
+Step and readback took 132.53 ms
+Step and readback took 121.83 ms
+Step and readback took 126.14 ms
+Step and readback took 120.03 ms
+Step and readback took 109.36 ms
+Step and readback took 105.59 ms
+Step and readback took 96.77 ms
+Step and readback took 100.07 ms
+Step and readback took 104.79 ms
+Step and readback took 153.04 ms
+Step and readback took 122.99 ms
+Step and readback took 113.32 ms
+Step and readback took 105.97 ms
+Step and readback took 95.39 ms
+Step and readback took 105.08 ms
+Step and readback took 110.59 ms
+Step and readback took 114.05 ms
+Step and readback took 104.65 ms
+Step and readback took 123.55 ms
+Step and readback took 114.05 ms
+Step and readback took 121.75 ms
+Step and readback took 130.27 ms
+Step and readback took 119.88 ms
+Step and readback took 112.35 ms
+Step and readback took 109.50 ms
+Step and readback took 113.29 ms
+Step and readback took 112.93 ms
+Step and readback took 121.14 ms
+Step and readback took 143.60 ms
+Step and readback took 140.42 ms
+Step and readback took 123.07 ms
+Step and readback took 121.76 ms
+Step and readback took 119.52 ms
+Step and readback took 129.28 ms
+Step and readback took 128.50 ms
+Step and readback took 126.25 ms
+Step and readback took 128.09 ms
+Step and readback took 128.71 ms
+Step and readback took 127.86 ms
+Step and readback took 127.56 ms
+Step and readback took 122.11 ms
+Step and readback took 116.36 ms
+Step and readback took 133.05 ms
+Step and readback took 127.48 ms
+Step and readback took 130.44 ms
+Step and readback took 117.51 ms
+Step and readback took 131.19 ms
+Step and readback took 127.50 ms
+Step and readback took 123.22 ms
+Step and readback took 121.66 ms
+Step and readback took 115.92 ms
+Step and readback took 119.67 ms
+Step and readback took 127.29 ms
+Step and readback took 137.04 ms
+Step and readback took 132.61 ms
+Step and readback took 138.20 ms
+Step and readback took 151.39 ms
+Step and readback took 127.96 ms
+Step and readback took 119.06 ms
+Step and readback took 117.11 ms
+Step and readback took 123.22 ms
+Step and readback took 128.03 ms
+Step and readback took 126.05 ms
+Step and readback took 133.29 ms
+Step and readback took 125.28 ms
+Step and readback took 126.63 ms
+Step and readback took 123.36 ms
+Step and readback took 138.11 ms
+Step and readback took 149.42 ms
+Step and readback took 103.56 ms
+Step and readback took 110.64 ms
+Step and readback took 101.03 ms
+Step and readback took 106.50 ms
+Step and readback took 118.85 ms
+Step and readback took 115.98 ms
+Step and readback took 111.33 ms
+Step and readback took 111.41 ms
+Step and readback took 127.35 ms
+Step and readback took 106.66 ms
+Step and readback took 102.94 ms
+Step and readback took 118.56 ms
+Step and readback took 143.12 ms
+--record: wrote 150 frames to sweep_refine_corr_fine_geometric_work/rec_norefine_r1.npz (positions 150x600x3, tets constant)
+[surface loss] 150 frames  RMSE mm  mean 2.80  min 0.83  max 6.60   (frame-mean MSE 9.213e-06 m^2)
+[surface loss] correspondence RMSE mm  mean 5.76  min 2.07  max 14.66   (frame-mean MSE 4.098e-05 m^2)
+[surface loss] wrote sweep_refine_corr_fine_geometric_work/loss_norefine_r1.npz
+

@@ -1,0 +1,8 @@
+{
+  "refine_every": {"flag": "--refine-every", "values": [1, 3, 10, 30]},
+  "refine_min_edge_length": {"flag": "--refine-min-edge-length", "values": [0.002, 0.003, 0.004, 0.008, 0.012]},
+  "refine_geometric_threshold": {"flag": "--refine-geometric-threshold", "values": [0.5, 1.0, 2.0, 4.0, 8.0]},
+  "refine_elastic_weight": {"flag": "--refine-elastic-weight", "values": [0.0, 1.0, 4.0]},
+  "refine_tri_contact_weight": {"flag": "--refine-tri-contact-weight", "values": [0.0, 1.0, 2.0]},
+  "refine_contact_weight": {"flag": "--refine-contact-weight", "values": [0.0, 1.0, 2.0]}
+}

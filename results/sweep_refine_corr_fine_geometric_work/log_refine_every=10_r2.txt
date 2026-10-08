@@ -1,0 +1,243 @@
+/home/gabriel/auras/warp-mfem/.venv/bin/python3 -m mfem.refinement.sim_octopus --episode octopus --record-frames 150 --quiet --headless -g -p -l -r --energy neohookean --mesh coarse --surface-loss --surface-loss-every 100000 --tracked-surface-detrend rigid --tracked-surface-alpha 0.0 --surface-loss-symmetric --surface-loss-correspondence --bail-unstable --refine-scoring geometric --surface-loss-reference reference_runs/fine_default.npz --refine-every 10 --surface-loss-out sweep_refine_corr_fine_geometric_work/loss_refine_every=10_r2.npz --record sweep_refine_corr_fine_geometric_work/rec_refine_every=10_r2.npz
+
+[polyscope] Backend: openGL_mock
+Warp 1.15.0 initialized:
+   CUDA Toolkit 12.9, Driver 13.2
+   Devices:
+     "cpu"      : "x86_64"
+     "cuda:0"   : "NVIDIA GeForce RTX 4060 Laptop GPU" (8 GiB, sm_89, mempool enabled)
+   Kernel cache:
+     /home/gabriel/.cache/warp/1.15.0
+episode octopus: --mesh coarse -> models/octopus_initial_coarse.npz
+--rest-shape: loaded models/octopus_rest_coarse.npz  (rest reference vs tracked start: median 2.14 mm / max 9.40 mm)
+tool path retracted 3.4 mm along -tool-axis so the poker starts 0 mm clear of the start-frame mesh
+tool trajectory: 155 frames, 5.13 s, start frame = 19 (t0 = 0.633 s, tool-free), origin span (mm) = [ 54.3 106.8 150. ], contact frames = 123, playback x1, verbatim
+per-tet material 'field' (E_field) transferred from models/octopus_stiffness_field.npz: 3450 id tets -> 2025 coarse tets, nearest-centroid dist mean 6.5 mm / max 16.3 mm; E (Pa) min 1651 / med 2832 / max 3633, nu 0.4263 -> mu (Pa) 579..1274, lambda (Pa) 3345..7362
+tracked surface: whole-body detrend = rigid (reference frame 19)
+tracked surface overlay: 155 frames, 15002 verts, 30000 tris, alpha 0  (/home/gabriel/auras/warp-mfem/PlushOctopus_T1/mesh_trajectories_canonical.npy)
+surface loss: scoring against reference recording reference_runs/fine_default.npz (150 frames, 6431 verts)
+[correspondence] bound 442 surface vertices to tracked frame 0 (bind residual RMS 2.16 mm, max 6.57 mm, unbound 0)
+Update system took 5.38 ms
+Assemble system took 13.23 ms
+Global solve took 34.57 ms
+Local solve took 0.16 ms
+Line search took 7.78 ms
+Update system took 0.58 ms
+Assemble system took 1.59 ms
+Global solve took 0.90 ms
+Local solve took 0.04 ms
+Line search took 2.32 ms
+Update system took 0.41 ms
+Assemble system took 1.48 ms
+Global solve took 0.76 ms
+Local solve took 0.03 ms
+Line search took 2.09 ms
+Update system took 0.44 ms
+Assemble system took 1.39 ms
+Global solve took 0.79 ms
+Local solve took 0.03 ms
+Line search took 2.15 ms
+Update system took 0.41 ms
+Assemble system took 1.41 ms
+Global solve took 0.77 ms
+Local solve took 0.03 ms
+Line search took 2.11 ms
+Update system took 0.40 ms
+Assemble system took 1.43 ms
+Global solve took 0.78 ms
+Local solve took 0.03 ms
+Line search took 2.18 ms
+Update system took 0.44 ms
+Assemble system took 1.41 ms
+Global solve took 0.80 ms
+Local solve took 0.03 ms
+Line search took 2.28 ms
+Update system took 0.45 ms
+Assemble system took 1.46 ms
+Global solve took 0.90 ms
+Local solve took 0.03 ms
+Line search took 2.22 ms
+Update system took 0.41 ms
+Assemble system took 1.44 ms
+Global solve took 0.81 ms
+Local solve took 0.03 ms
+Line search took 2.24 ms
+Update system took 0.49 ms
+Assemble system took 1.38 ms
+Global solve took 0.84 ms
+Local solve took 0.03 ms
+Line search took 2.27 ms
+Update system took 0.50 ms
+Assemble system took 1.69 ms
+Global solve took 0.95 ms
+Local solve took 0.04 ms
+Line search took 2.31 ms
+Update system took 0.44 ms
+Assemble system took 1.48 ms
+Global solve took 0.85 ms
+Local solve took 0.04 ms
+Line search took 2.36 ms
+new tet count 2029, new tri count 884, new vert count 602
+Step and readback took 173.43 ms
+Step and readback took 149.47 ms
+Step and readback took 104.56 ms
+Step and readback took 100.61 ms
+Step and readback took 91.47 ms
+Step and readback took 90.93 ms
+Step and readback took 97.08 ms
+Step and readback took 110.80 ms
+Step and readback took 138.54 ms
+Step and readback took 96.65 ms
+new tet count 2419, new tri count 930, new vert count 693
+Step and readback took 98.41 ms
+Step and readback took 107.57 ms
+Step and readback took 105.73 ms
+Step and readback took 99.84 ms
+Step and readback took 105.67 ms
+Step and readback took 113.47 ms
+Step and readback took 110.22 ms
+Step and readback took 111.45 ms
+Step and readback took 102.41 ms
+Step and readback took 135.48 ms
+new tet count 2843, new tri count 964, new vert count 783
+Step and readback took 99.31 ms
+Step and readback took 100.89 ms
+Step and readback took 110.16 ms
+Step and readback took 109.45 ms
+Step and readback took 100.75 ms
+Step and readback took 266.51 ms
+Step and readback took 116.34 ms
+Step and readback took 120.92 ms
+Step and readback took 111.51 ms
+Step and readback took 106.88 ms
+new tet count 3410, new tri count 1004, new vert count 898
+Step and readback took 131.94 ms
+Step and readback took 142.86 ms
+Step and readback took 146.97 ms
+Step and readback took 136.74 ms
+Step and readback took 180.11 ms
+Step and readback took 135.16 ms
+Step and readback took 127.79 ms
+Step and readback took 124.33 ms
+Step and readback took 117.40 ms
+Step and readback took 129.55 ms
+new tet count 4166, new tri count 1060, new vert count 1057
+Step and readback took 122.62 ms
+Step and readback took 121.57 ms
+Step and readback took 119.22 ms
+Step and readback took 140.82 ms
+Step and readback took 119.11 ms
+Step and readback took 119.09 ms
+Step and readback took 117.60 ms
+Step and readback took 126.86 ms
+Step and readback took 110.05 ms
+Step and readback took 112.53 ms
+new tet count 4519, new tri count 1092, new vert count 1132
+Step and readback took 143.12 ms
+Step and readback took 125.70 ms
+Step and readback took 123.53 ms
+Step and readback took 131.44 ms
+Step and readback took 134.91 ms
+Step and readback took 159.93 ms
+Step and readback took 133.90 ms
+Step and readback took 297.96 ms
+Step and readback took 141.81 ms
+Step and readback took 126.26 ms
+new tet count 5275, new tri count 1130, new vert count 1281
+Step and readback took 131.09 ms
+Step and readback took 132.42 ms
+Step and readback took 117.34 ms
+Step and readback took 149.27 ms
+Step and readback took 176.23 ms
+Step and readback took 172.69 ms
+Step and readback took 178.71 ms
+Step and readback took 180.88 ms
+Step and readback took 179.34 ms
+Step and readback took 150.70 ms
+new tet count 6238, new tri count 1200, new vert count 1472
+Step and readback took 180.64 ms
+Step and readback took 187.93 ms
+Step and readback took 170.13 ms
+Step and readback took 157.50 ms
+Step and readback took 145.10 ms
+Step and readback took 148.78 ms
+Step and readback took 178.13 ms
+Step and readback took 140.44 ms
+Step and readback took 166.79 ms
+Step and readback took 188.83 ms
+new tet count 7372, new tri count 1290, new vert count 1705
+Step and readback took 156.85 ms
+Step and readback took 167.07 ms
+Step and readback took 201.53 ms
+Step and readback took 189.03 ms
+Step and readback took 178.89 ms
+Step and readback took 189.36 ms
+Step and readback took 223.09 ms
+Step and readback took 172.20 ms
+Step and readback took 262.43 ms
+Step and readback took 175.83 ms
+Step and readback took 180.60 ms
+Step and readback took 173.48 ms
+Step and readback took 172.09 ms
+Step and readback took 174.35 ms
+Step and readback took 174.52 ms
+Step and readback took 181.53 ms
+Step and readback took 221.47 ms
+Step and readback took 222.14 ms
+Step and readback took 270.50 ms
+Step and readback took 240.08 ms
+Step and readback took 234.85 ms
+Step and readback took 252.60 ms
+Step and readback took 213.76 ms
+Step and readback took 243.72 ms
+Step and readback took 299.30 ms
+Step and readback took 200.05 ms
+Step and readback took 221.11 ms
+Step and readback took 254.47 ms
+Step and readback took 207.85 ms
+Step and readback took 294.88 ms
+Step and readback took 249.34 ms
+Step and readback took 228.92 ms
+Step and readback took 243.42 ms
+Step and readback took 230.57 ms
+Step and readback took 222.43 ms
+Step and readback took 247.51 ms
+Step and readback took 232.51 ms
+Step and readback took 197.63 ms
+Step and readback took 253.09 ms
+Step and readback took 232.80 ms
+Step and readback took 183.46 ms
+Step and readback took 272.15 ms
+Step and readback took 256.99 ms
+Step and readback took 204.09 ms
+Step and readback took 316.69 ms
+Step and readback took 199.16 ms
+Step and readback took 299.97 ms
+Step and readback took 229.00 ms
+Step and readback took 214.94 ms
+Step and readback took 483.56 ms
+Step and readback took 204.27 ms
+Step and readback took 296.01 ms
+Step and readback took 208.85 ms
+Step and readback took 217.80 ms
+Step and readback took 293.57 ms
+Step and readback took 232.09 ms
+Step and readback took 209.29 ms
+Step and readback took 224.52 ms
+Step and readback took 239.63 ms
+Step and readback took 215.53 ms
+Step and readback took 205.76 ms
+Step and readback took 205.88 ms
+Step and readback took 263.40 ms
+Step and readback took 225.58 ms
+Step and readback took 192.89 ms
+Step and readback took 290.49 ms
+Step and readback took 192.42 ms
+Step and readback took 210.86 ms
+Step and readback took 212.55 ms
+Step and readback took 255.56 ms
+--record: wrote 150 frames to sweep_refine_corr_fine_geometric_work/rec_refine_every=10_r2.npz (positions ragged, tets ragged)
+[surface loss] 150 frames  RMSE mm  mean 2.66  min 0.77  max 5.29   (frame-mean MSE 8.004e-06 m^2)
+[surface loss] correspondence RMSE mm  mean 4.35  min 1.92  max 11.43   (frame-mean MSE 2.538e-05 m^2)
+[surface loss] wrote sweep_refine_corr_fine_geometric_work/loss_refine_every=10_r2.npz
+
