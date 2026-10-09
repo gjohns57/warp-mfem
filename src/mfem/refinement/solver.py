@@ -231,8 +231,34 @@ class RefinementSolver(SolverBase):
             if self._use_preconditioner
             else None
         )
+        # Optional free rigid bodies penalty-coupled to soft nodes (see rigid.py). Their 6-DOF
+        # blocks are Schur-eliminated, so CG still only solves for dx -- against a matrix-free
+        # operator wrapping the assembled H. Without a RigidCoupling this is just _global_lhs.
+        self._rigid = kwargs.get("rigid_coupling", None)
+        cg_operator = self._global_lhs
+        if self._rigid is not None:
+            base_op = warp.optim.linear.aslinearoperator(self._global_lhs)
+            rigid = self._rigid
+            cg_operator = warp.optim.linear.LinearOperator(
+                base_op.shape,
+                base_op.dtype,
+                base_op.device,
+                matvec=lambda x, y, z, alpha, beta: rigid.schur_matvec(x, y, z, alpha, beta, base_op.matvec),
+            )
+            self._rigid_hessian_dx = ws.bsr_zeros(
+                self.max_particles,
+                self.max_particles,
+                wp.mat33,
+                topology="padded",
+                row_capacity=1,
+                nnz_capacity=self.max_particles,
+            )
+            self._rigid_hessian_axpy_work_arrays = ws.bsr_axpy_work_arrays()
+            self._rigid_objective = wp.zeros(1, dtype=wp.float32)
+            self._rigid_kinetic_scratch = wp.zeros(rigid.num_bodies, dtype=wp.float32)
+            self._rigid_penalty_scratch = wp.zeros(rigid.num_attachments, dtype=wp.float32)
         self._cg = warp.optim.linear.cg(
-            self._global_lhs,
+            cg_operator,
             self._global_rhs,
             self._dx,
             maxiter=self._cg_max_iterations,
@@ -529,6 +555,8 @@ class RefinementSolver(SolverBase):
         # the start-of-step positions here -- integrate_particles only wrote
         # self._particle_q_tilde.
         self._contact.begin_step(self.model, state_out, additional_state_1)
+        if self._rigid is not None:
+            self._rigid.begin_step(self.model, state_out, dt)
 
         for i in range(self.iterations):
             with wp.ScopedTimer("Update system", dict=self._timings):
@@ -541,6 +569,8 @@ class RefinementSolver(SolverBase):
                 guess = self._dx
                 wp.copy(guess, self._particle_q_tilde - state_out.particle_q)
                 dx = self._global_solve(H, g, guess, additional_state_1)
+                if self._rigid is not None:
+                    self._rigid.recover_twist(dx)
 
             with wp.ScopedTimer("Local solve", dict=self._timings):
                 ds, new_lmbda = self._local_solve(state_out, additional_state_1, dx)
@@ -566,6 +596,12 @@ class RefinementSolver(SolverBase):
             else:
                 state_out.particle_q += dx
                 additional_state_1.tet_stretch += ds
+                if self._rigid is not None:
+                    self._rigid.twist += self._rigid.dtwist
+
+            if self._rigid is not None:
+                # accepted twist -> body_q / body_qd (velocity from the step-start pose)
+                self._rigid.commit(state_in, state_out, dt)
 
         # Deliberately guarded on the OLD (pre-refinement) count, not
         # additional_state_1's: this finite-differences against
@@ -648,6 +684,8 @@ class RefinementSolver(SolverBase):
         self._contact.evaluate(self.model, state, additional_state, dt)
         if self._shell is not None:
             self._shell.evaluate(state, additional_state)
+        if self._rigid is not None:
+            self._rigid.evaluate(state, dt)
 
     def _assemble_system(self, state: State, additional_state: AdditionalState, dt: float) -> tuple[ws.BsrMatrix, wp.array]:
 
@@ -807,6 +845,27 @@ class RefinementSolver(SolverBase):
                 topology="padded",
             )
 
+        if self._rigid is not None:
+            # Penalty x-block (k I per attachment, duplicates on one node coalesce), then
+            # Schur-eliminate the rigid DOFs from the right-hand side.
+            g -= self._rigid.node_gradient
+            ws.bsr_set_from_triplets(
+                self._rigid_hessian_dx,
+                self._rigid.att_node,
+                self._rigid.att_node,
+                self._rigid.node_hessian_blocks,
+                count=self._rigid.node_count,
+                topology="padded",
+            )
+            ws.bsr_axpy(
+                self._rigid_hessian_dx,
+                H,
+                alpha=1.0,
+                work_arrays=self._rigid_hessian_axpy_work_arrays,
+                topology="padded",
+            )
+            self._rigid.eliminate_rhs(g)
+
         return H, g
 
 
@@ -821,6 +880,7 @@ class RefinementSolver(SolverBase):
         x_tilde: wp.array[wp.vec3],
         dt: float,
         objective: wp.array[wp.float32],
+        twist: wp.array[vec6] | None = None,
     ) -> wp.array:
         """Evaluates the Lagrangian merit function (lambda held fixed) at a trial (x, s).
         Used by the line search, so this only ever needs the scalar energy -- the *_only
@@ -877,6 +937,16 @@ class RefinementSolver(SolverBase):
             self._accumulator.compute_sum(self._shell.energy)
             linear_accumulate(objective, self._accumulator.result(), beta=1.0)
 
+        if self._rigid is not None:
+            # rigid inertia (kinetic, already / dt^2 inside) + attachment penalty, at pose(twist)
+            self._rigid.energy_trial(
+                x, body_q, twist, dt, self._rigid_kinetic_scratch, self._rigid_penalty_scratch
+            )
+            self._accumulator.compute_sum(self._rigid_kinetic_scratch)
+            linear_accumulate(objective, self._accumulator.result(), beta=1.0)
+            self._accumulator.compute_sum(self._rigid_penalty_scratch)
+            linear_accumulate(objective, self._accumulator.result(), beta=1.0)
+
         return objective
 
     def _line_search(
@@ -903,7 +973,10 @@ class RefinementSolver(SolverBase):
         # unscaled, so its objective sits at a much smaller characteristic
         # magnitude (empirically O(1e-4)-O(1e-3) even for a modest mesh).
         def objective_fn(dof_arrays: tuple[wp.array], objective: wp.array[wp.float32]):
-            self._objective(dof_arrays[0], dof_arrays[1], lmbda, additional_state, body_q, x_tilde, dt, objective)
+            self._objective(
+                dof_arrays[0], dof_arrays[1], lmbda, additional_state, body_q, x_tilde, dt, objective,
+                twist=dof_arrays[2] if self._rigid is not None else None,
+            )
 
         # Newton solves against the stretch's own Lagrangian gradient directly (see
         # local_solve_stretch); mirror that here rather than the sign convention
@@ -917,6 +990,9 @@ class RefinementSolver(SolverBase):
 
         dof_arrays = (x, s)
         search_direction = (dx, ds)
+        if self._rigid is not None:
+            dof_arrays = dof_arrays + (self._rigid.twist,)
+            search_direction = search_direction + (self._rigid.dtwist,)
         gradient_x = g_x + self._contact.barrier_gradient + self._contact.friction_gradient - G_xt @ lmbda
         if self._shell is not None:
             gradient_x = gradient_x + self._shell.gradient
@@ -924,6 +1000,9 @@ class RefinementSolver(SolverBase):
             gradient_x,
             self._stretch_lagrangian_gradient,
         )
+        if self._rigid is not None:
+            gradient_x = gradient_x + self._rigid.node_gradient
+            gradient = (gradient_x, self._stretch_lagrangian_gradient, self._rigid.body_gradient)
 
         return backtracking_line_search(
             objective_fn,
